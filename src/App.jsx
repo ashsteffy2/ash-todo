@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabaseClient";
 
 const SECTIONS = [
   { id: "parking", label: "Parking Lot", color: "#8B7355" },
@@ -156,7 +157,7 @@ const mkTask = o => ({
   blocker:"", notes:"", stakeholders:[], done:false, created:todayStr(),
   recurType:"None", recurDay:null, recurDate:null, recurDays:[], recurMonth:null, recurDOM:null,
   recurInterval:null, recurUnit:null, recurAnchor:null,
-  recurEndDate:null, dueDate:null, ...o
+  recurEndDate:null, dueDate:null, dbId:null, ...o
 });
 
 const nrmTask = t => mkTask({
@@ -168,7 +169,7 @@ const nrmTask = t => mkTask({
   recurDays:t.recurDays||[], recurMonth:t.recurMonth??null,
   recurDOM:t.recurDOM??t.recurDayOfMonth??null,
   recurInterval:t.recurInterval??null, recurUnit:t.recurUnit||(t.recurType==="Every-X-Months"?"Months":null), recurAnchor:t.recurAnchor||null,
-  recurEndDate:t.recurEndDate||null, dueDate:t.dueDate||null,
+  recurEndDate:t.recurEndDate||null, dueDate:t.dueDate||null, dbId:t.dbId||null,
 });
 
 const DEFAULT_TASKS = [
@@ -858,7 +859,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParkin
   );
 };
 
-export default function App() {
+export default function App({ session, signOut }) {
   const [tasks,setTasks] = useState([]);
   const [loaded,setLoaded] = useState(false);
   const [areas,setAreas] = useState(["Work","Personal"]);
@@ -910,30 +911,89 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Fetch tasks from Supabase when the user signs in
   useEffect(()=>{
-    const loadFromStorage = async () => {
-      try {
-        const stored = localStorage.getItem("ash-todo-v6");
-        const raw = stored ? JSON.parse(stored).map(nrmTask) : DEFAULT_TASKS;
-        const needsMigr = raw.some(t=>!!MIGRATION_MAP[t.area]);
-        if (needsMigr) setMigr(raw); else setTasks(raw);
-      } catch {
-        setTasks(DEFAULT_TASKS);
+    if (!session) return;
+    const loadFromSupabase = async () => {
+      const { data, error } = await supabase
+        .from("tasks")
+        .select("id, data")
+        .order("id", { ascending: true });
+      if (error) {
+        console.error("Failed to load tasks:", error);
+        setTasks([]);
+      } else {
+        // Each row: { id, data: {...task fields} }. We unpack data into the task and keep the row id.
+        const loaded = data.map(row => nrmTask({ ...row.data, dbId: row.id }));
+        setTasks(loaded);
       }
       try{ const a=JSON.parse(localStorage.getItem("ash-areas")); if(a&&a.length)setAreas(a); }catch{}
       try{ const p=JSON.parse(localStorage.getItem("ash-projects")); if(p&&p.length)setProjects(p); }catch{}
       setLoaded(true);
     };
-    loadFromStorage();
-  },[]);
+    loadFromSupabase();
+  },[session]);
 
+  // Save changes to Supabase (debounced to avoid hammering on every keystroke)
+  const saveTimerRef = useRef(null);
+  const lastSavedRef = useRef("");
   useEffect(()=>{
-    if (!loaded) return;
-    try { localStorage.setItem("ash-todo-v6", JSON.stringify(tasks)); } catch {}
-    setSaved("Saved");
-    const t=setTimeout(()=>setSaved(""),1500);
-    return()=>clearTimeout(t);
-  },[tasks,loaded]);
+    if (!loaded || !session) return;
+    const snapshot = JSON.stringify(tasks);
+    if (snapshot === lastSavedRef.current) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setSaved("Saving…");
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        // Strategy: per-task upsert. Each task has dbId (set after first save).
+        // Tasks without dbId are inserted; with dbId are updated.
+        const userId = session.user.id;
+        const newTasks = tasks.filter(t => !t.dbId);
+        const existingTasks = tasks.filter(t => t.dbId);
+
+        // Upsert existing
+        if (existingTasks.length) {
+          const rows = existingTasks.map(t => ({
+            id: t.dbId,
+            user_id: userId,
+            data: { ...t, dbId: undefined },
+            updated_at: new Date().toISOString(),
+          }));
+          const { error } = await supabase.from("tasks").upsert(rows);
+          if (error) throw error;
+        }
+
+        // Insert new (and capture their new IDs back into state)
+        if (newTasks.length) {
+          const rows = newTasks.map(t => ({
+            user_id: userId,
+            data: { ...t, dbId: undefined },
+          }));
+          const { data: inserted, error } = await supabase
+            .from("tasks")
+            .insert(rows)
+            .select("id");
+          if (error) throw error;
+          // Assign new dbIds back to the corresponding tasks in state
+          setTasks(prev => prev.map((t, i) => {
+            if (t.dbId) return t;
+            const newIdx = newTasks.indexOf(t);
+            if (newIdx === -1) return t;
+            return { ...t, dbId: inserted[newIdx].id };
+          }));
+        }
+
+        lastSavedRef.current = JSON.stringify(tasks);
+        setSaved("Saved");
+        setTimeout(()=>setSaved(""), 1500);
+      } catch (err) {
+        console.error("Save failed:", err);
+        setSaved("Save failed");
+        setTimeout(()=>setSaved(""), 3000);
+      }
+    }, 800);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  },[tasks, loaded, session]);
 
   const doMigr = yes => {
     setTasks(yes ? migr.map(t=>({...t,area:MIGRATION_MAP[t.area]||t.area})) : migr);
@@ -966,7 +1026,14 @@ export default function App() {
     setTasksWithHistory(p=>p.map(t=>t.id===updated.id?nrmTask(updated):t));
   };
 
-  const delTask = id => setTasksWithHistory(p=>p.filter(t=>t.id!==id));
+  const delTask = async (id) => {
+    const t = tasks.find(x => x.id === id);
+    setTasksWithHistory(p => p.filter(x => x.id !== id));
+    if (t?.dbId) {
+      const { error } = await supabase.from("tasks").delete().eq("id", t.dbId);
+      if (error) console.error("Delete failed:", error);
+    }
+  };
 
   const mv2today = task => setTasksWithHistory(p=>p.map(t=>t.id===task.id?{...t,section:"today",state:"To Do",dueDate:todayStr()}:t));
 
@@ -1034,7 +1101,7 @@ export default function App() {
         <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
           <span style={{fontSize:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
           <span style={{fontSize:12,color:"#999",fontFamily:"monospace"}}>
-            {nAct} active · {nDone} done
+            {nAct} active · {nDone} done · {session?.user?.email}
             {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
             {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
             {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
@@ -1060,6 +1127,26 @@ export default function App() {
             style={{...S.btn, opacity: historyCount===0 ? 0.4 : 1, cursor: historyCount===0 ? "not-allowed" : "pointer"}}
           >↶ Undo{historyCount>0?` (${historyCount})`:""}</button>
           <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>
+          <button
+            onClick={async () => {
+              const stored = localStorage.getItem("ash-todo-v6");
+              if (!stored) { alert("No localStorage tasks found on this device."); return; }
+              try {
+                const oldTasks = JSON.parse(stored);
+                if (!Array.isArray(oldTasks) || !oldTasks.length) { alert("No tasks to import."); return; }
+                if (!confirm(`Import ${oldTasks.length} tasks from this device's localStorage? They will be added to your cloud tasks.`)) return;
+                // Strip any existing dbId so they save as new rows
+                const fresh = oldTasks.map(t => nrmTask({...t, dbId: null}));
+                setTasksWithHistory(p => [...p, ...fresh]);
+                // Clear localStorage so we don't double-import
+                localStorage.removeItem("ash-todo-v6");
+                alert("Imported! Old localStorage cleared.");
+              } catch (e) { alert("Import failed: " + e.message); }
+            }}
+            style={S.btn}
+            title="One-time: bring over tasks from this device's localStorage"
+          >⇪ Import local</button>
+          <button onClick={signOut} style={{...S.btn, color:"#C0392B"}}>Sign out</button>
           <label style={S.btn}>
             ↑ Import JSON
             <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
