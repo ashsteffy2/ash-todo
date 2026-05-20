@@ -33,6 +33,8 @@ const priorityOrder = p => p==="High"?0:p==="Medium"?1:2;
 const deriveSection = task => {
   const today = todayStr();
   if (task.done) return "done";
+  // Pinned to parking lot: stay in parking until explicitly moved out
+  if (task.pinnedToParking) return "parking";
   if (task.state==="Waiting For" && task.priority==="High") return "wf-urgent";
   if (task.state==="Waiting For") return "wf-other";
   if (task.recurType && task.recurType!=="None") {
@@ -157,7 +159,7 @@ const mkTask = o => ({
   blocker:"", notes:"", stakeholders:[], done:false, created:todayStr(),
   recurType:"None", recurDay:null, recurDate:null, recurDays:[], recurMonth:null, recurDOM:null,
   recurInterval:null, recurUnit:null, recurAnchor:null,
-  recurEndDate:null, dueDate:null, dbId:null, ...o
+  recurEndDate:null, dueDate:null, dbId:null, pinnedToParking:false, ...o
 });
 
 const nrmTask = t => mkTask({
@@ -170,6 +172,7 @@ const nrmTask = t => mkTask({
   recurDOM:t.recurDOM??t.recurDayOfMonth??null,
   recurInterval:t.recurInterval??null, recurUnit:t.recurUnit||(t.recurType==="Every-X-Months"?"Months":null), recurAnchor:t.recurAnchor||null,
   recurEndDate:t.recurEndDate||null, dueDate:t.dueDate||null, dbId:t.dbId||null,
+  pinnedToParking:t.pinnedToParking===true,
 });
 
 const DEFAULT_TASKS = [
@@ -298,7 +301,7 @@ const FieldEditorOverlay = ({title,storageKey,tasks,onClose}) => {
   );
 };
 
-const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onProjectsChange}) => {
+const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onProjectsChange,isParking,onMoveToTasks}) => {
   const [t,setT] = useState({...task});
   const [showAE,setShowAE] = useState(false);
   const [showPE,setShowPE] = useState(false);
@@ -332,6 +335,13 @@ const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onPro
           <div style={{position:"sticky",top:0,zIndex:10,background:"#FFF",borderBottom:"1px solid #EEE",padding:"12px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <div style={{fontSize:13,fontWeight:"bold",color:"#666"}}>Edit Task</div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {isParking && onMoveToTasks && (
+                <button
+                  style={{...S.btn,background:"#2C2C2C",color:"#FFF",border:"none"}}
+                  onClick={()=>{ onMoveToTasks(t); onClose(); }}
+                  title="Save edits and move out of Parking Lot"
+                >Move to Tasks</button>
+              )}
               <button style={S.btn} onClick={onClose}>Cancel</button>
               <button style={{...S.btn,background:"#2C2C2C",color:"#FFF",border:"none"}} onClick={()=>onSave(t)}>Save</button>
               <button onClick={onClose} title="Close" style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:"#999",lineHeight:1,padding:"0 4px"}}>✕</button>
@@ -777,7 +787,7 @@ const InlineText = ({value, onSave, placeholder, style, multiline=false, taskDon
   return <span onClick={e=>{e.stopPropagation();setEditing(true);}} style={{...style, cursor:"text", textDecoration:taskDone?"line-through":"none"}}>{value}</span>;
 };
 
-const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParking,areas,projects,onProjectsChange}) => {
+const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveToTasks,onDuplicate,onPinToParking,isParking,areas,projects,onProjectsChange}) => {
   const [hovered,setHovered] = useState(false);
   const [editing,setEditing] = useState(false);
   const [showNotes,setShowNotes] = useState(false);
@@ -795,6 +805,16 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParkin
     touchStartX.current=null;
   };
 
+  // In Parking Lot: pin on first edit click so the task doesn't fly out
+  // when fields like priority/dueDate/state change. Cleared by "Move to Tasks".
+  // Uses functional updater (onPinToParking) so it composes safely with concurrent
+  // onSave calls from the same click event.
+  const handleEditAreaClick = () => {
+    if (isParking && !task.pinnedToParking) {
+      onPinToParking(task.id);
+    }
+  };
+
   return (
     <>
       <div style={{display:"flex",alignItems:"flex-start",padding:"6px 16px",borderBottom:"1px solid #F0F0F0",gap:8,background:hovered?"#F5F5F0":"transparent",opacity:task.done?0.6:1}}
@@ -802,7 +822,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParkin
         onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}
       >
         <button onClick={()=>onToggleDone(task)} style={{width:16,height:16,borderRadius:"50%",border:`1.5px solid ${task.done?"#BBB":"#888"}`,background:task.done?"#BBB":"transparent",cursor:"pointer",flexShrink:0,marginTop:4,padding:0}} />
-        <div style={{flex:1,minWidth:0}}>
+        <div style={{flex:1,minWidth:0}} onClickCapture={handleEditAreaClick}>
           <div style={{display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px"}}>
             <InlinePriority task={task} onSave={onSave} />
             <InlineDate task={task} onSave={onSave} rowHovered={hovered} />
@@ -815,6 +835,11 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParkin
               style={{fontSize:14, lineHeight:1.4, wordBreak:"break-word"}}
             />
             <InlineArea task={task} onSave={onSave} areas={areas} />
+            <button
+              onClick={e=>{e.stopPropagation();onDuplicate(task);}}
+              title="Duplicate task"
+              style={{background:"none",border:"none",cursor:"pointer",fontSize:12,padding:"0 2px",color:hovered?"#888":"#CCC",lineHeight:1}}
+            >⎘</button>
             <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} />
             <InlineStakeholders task={task} onSave={onSave} />
             {/* Blocker inline — wraps only if needed */}
@@ -848,13 +873,14 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,isParkin
         </div>
         {hovered&&(
           <div style={{display:"flex",gap:4,flexShrink:0}}>
-            {isParking&&<button onClick={()=>onMoveToToday(task)} style={{...S.btn,fontSize:11,color:"#C0392B",borderColor:"#C0392B",padding:"2px 8px"}}>→Today</button>}
+            {isParking && task.pinnedToParking && <button onClick={()=>onMoveToTasks(task)} style={{...S.btn,fontSize:11,color:"#FFF",background:"#2C2C2C",borderColor:"#2C2C2C",padding:"2px 8px"}}>Move to Tasks</button>}
+            {isParking && !task.pinnedToParking && <button onClick={()=>onMoveToToday(task)} style={{...S.btn,fontSize:11,color:"#C0392B",borderColor:"#C0392B",padding:"2px 8px"}}>→Today</button>}
             <button onClick={()=>setEditing(true)} title="Open full editor" style={{...S.btn,fontSize:11,padding:"2px 8px"}}>✎</button>
             <button onClick={()=>onDelete(task.id)} style={{...S.btn,fontSize:11,color:"#C0392B",padding:"2px 8px"}}>✕</button>
           </div>
         )}
       </div>
-      {editing&&<EditModal task={task} tasks={tasks} areas={areas} projects={projects} onAreasChange={()=>{}} onProjectsChange={onProjectsChange} onSave={t=>{onSave(t);setEditing(false);}} onClose={()=>setEditing(false)} />}
+      {editing&&<EditModal task={task} tasks={tasks} areas={areas} projects={projects} onAreasChange={()=>{}} onProjectsChange={onProjectsChange} isParking={isParking} onMoveToTasks={onMoveToTasks} onSave={t=>{onSave(t);setEditing(false);}} onClose={()=>setEditing(false)} />}
     </>
   );
 };
@@ -1035,7 +1061,26 @@ export default function App({ session, signOut }) {
     }
   };
 
-  const mv2today = task => setTasksWithHistory(p=>p.map(t=>t.id===task.id?{...t,section:"today",state:"To Do",dueDate:todayStr()}:t));
+  // Pin a task to Parking Lot (called when user first interacts with a parking lot row).
+  // Uses functional updater so it composes correctly with concurrent saveTask calls
+  // from inline editors fired in the same click event.
+  const pinToParking = id => setTasks(p => p.map(t => t.id===id && !t.pinnedToParking ? {...t, pinnedToParking: true} : t));
+
+  const mv2today = task => setTasksWithHistory(p=>p.map(t=>t.id===task.id?{...t,section:"today",state:"To Do",dueDate:todayStr(),pinnedToParking:false}:t));
+
+  // Move a parking lot task out: clear pin and section, let deriveSection place it.
+  // Accepts the latest task data (may include unsaved edits from EditModal).
+  const mv2tasks = task => setTasksWithHistory(p=>p.map(t=>t.id===task.id?nrmTask({...task,pinnedToParking:false,section:""}):t));
+
+  // Duplicate: clone task with new id, no dbId, insert immediately after the original.
+  const duplicateTask = task => {
+    setTasksWithHistory(p => {
+      const idx = p.findIndex(x => x.id === task.id);
+      if (idx === -1) return p;
+      const copy = nrmTask({...task, id: genId(), dbId: null, created: todayStr()});
+      return [...p.slice(0, idx+1), copy, ...p.slice(idx+1)];
+    });
+  };
 
   const passFilter = t => {
     if (view==="work"&&t.area!=="Work") return false;
@@ -1091,7 +1136,9 @@ export default function App({ session, signOut }) {
   const rowProps = (t,sec) => ({
     task:t, tasks, areas, projects,
     onToggleDone:toggleDone, onSave:saveTask, onDelete:delTask,
-    onMoveToToday:mv2today, isParking:sec.id==="parking",
+    onMoveToToday:mv2today, onMoveToTasks:mv2tasks, onDuplicate:duplicateTask,
+    onPinToParking:pinToParking,
+    isParking:sec.id==="parking",
     onProjectsChange: projectsChangeHandler
   });
 
@@ -1107,19 +1154,7 @@ export default function App({ session, signOut }) {
             {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
           </span>
         </div>
-        <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
-          {["both","work","personal","today"].map(v=>(
-            <button key={v} onClick={()=>setView(v)} style={{...S.tog(view===v),textTransform:v==="today"?"none":"capitalize"}}>
-              {v==="today"?"Today ✦":v.charAt(0).toUpperCase()+v.slice(1)}
-            </button>
-          ))}
-        </div>
-        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}>
-          <span style={{fontSize:12,color:"#8B7355",fontStyle:"italic"}}>+ lot</span>
-          <input value={quick} onChange={e=>setQuick(e.target.value)} onKeyDown={addQ} placeholder="Quick capture → Enter to add to Parking Lot" style={{flex:1,border:"none",borderBottom:"1px solid #CCC",background:"transparent",fontSize:13,padding:"3px 0",outline:"none",fontFamily:"Georgia,serif"}} />
-        </div>
-        <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Search…" style={{width:"100%",border:"none",borderBottom:"1px solid #EEE",background:"transparent",fontSize:12,padding:"2px 0",outline:"none",fontFamily:"sans-serif",color:"#666",boxSizing:"border-box",marginBottom:6}} />
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
           <button
             onClick={undo}
             disabled={historyCount===0}
@@ -1127,6 +1162,15 @@ export default function App({ session, signOut }) {
             style={{...S.btn, opacity: historyCount===0 ? 0.4 : 1, cursor: historyCount===0 ? "not-allowed" : "pointer"}}
           >↶ Undo{historyCount>0?` (${historyCount})`:""}</button>
           <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>
+          <label style={S.btn}>
+            ↑ Import JSON
+            <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
+              const f=e.target.files[0]; if(!f)return;
+              const r=new FileReader();
+              r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(Array.isArray(d))setImp(d.map(nrmTask));else alert("Invalid file.");}catch(err){alert("Error: "+err.message);}};
+              r.readAsText(f); e.target.value="";
+            }} />
+          </label>
           <button
             onClick={async () => {
               const stored = localStorage.getItem("ash-todo-v6");
@@ -1145,17 +1189,32 @@ export default function App({ session, signOut }) {
             }}
             style={S.btn}
             title="One-time: bring over tasks from this device's localStorage"
-          >⇪ Import local</button>
-          <button onClick={signOut} style={{...S.btn, color:"#C0392B"}}>Sign out</button>
-          <label style={S.btn}>
-            ↑ Import JSON
-            <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
-              const f=e.target.files[0]; if(!f)return;
-              const r=new FileReader();
-              r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(Array.isArray(d))setImp(d.map(nrmTask));else alert("Invalid file.");}catch(err){alert("Error: "+err.message);}};
-              r.readAsText(f); e.target.value="";
-            }} />
-          </label>
+          >⇪ Import Local</button>
+          <button onClick={signOut} style={{...S.btn, color:"#C0392B"}}>Sign Out</button>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",flexShrink:0}}>
+            {["both","work","personal","today"].map(v=>(
+              <button key={v} onClick={()=>setView(v)} style={{...S.tog(view===v),textTransform:v==="today"?"none":"capitalize"}}>
+                {v==="today"?"Today ✦":v==="both"?"All":v.charAt(0).toUpperCase()+v.slice(1)}
+              </button>
+            ))}
+          </div>
+          <div style={{flex:1,minWidth:180,position:"relative",display:"flex",alignItems:"center"}}>
+            <input
+              value={filter}
+              onChange={e=>setFilter(e.target.value)}
+              placeholder="Search…"
+              style={{width:"100%",border:"none",borderBottom:"1px solid #EEE",background:"transparent",fontSize:12,padding:"2px 18px 2px 0",outline:"none",fontFamily:"sans-serif",color:"#666",boxSizing:"border-box"}}
+            />
+            {filter && (
+              <button
+                onClick={()=>setFilter("")}
+                title="Clear search"
+                style={{position:"absolute",right:0,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"#999",fontSize:14,lineHeight:1,padding:"0 4px",fontFamily:"Georgia,serif"}}
+              >✕</button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1176,9 +1235,21 @@ export default function App({ session, signOut }) {
               <div style={{color:sec.color,fontWeight:"bold",fontSize:14,padding:"10px 16px 4px",borderBottom:`2px solid ${sec.color}30`,display:"flex",alignItems:"center",gap:8}}>
                 <span>{sec.label}</span>
                 <span style={{fontSize:12,color:"#BBB",fontWeight:"normal"}}>{items.length}</span>
-                {sec.id!=="done"&&<button onClick={()=>addToSec(sec.id)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:sec.color,fontSize:18,lineHeight:1}}>＋</button>}
+                {sec.id!=="done"&&sec.id!=="parking"&&<button onClick={()=>addToSec(sec.id)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:sec.color,fontSize:18,lineHeight:1}}>＋</button>}
               </div>
-              {!items.length&&<div style={{padding:"6px 16px",fontSize:12,color:"#CCC",fontStyle:"italic"}}>Empty</div>}
+              {sec.id==="parking"&&(
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 16px",borderBottom:"1px solid #F0F0F0"}}>
+                  <span style={{width:16,flexShrink:0}} />
+                  <input
+                    value={quick}
+                    onChange={e=>setQuick(e.target.value)}
+                    onKeyDown={addQ}
+                    placeholder="+ add to Parking Lot — Enter to save"
+                    style={{flex:1,border:"none",background:"transparent",fontSize:14,padding:"3px 0",outline:"none",fontFamily:"Georgia,serif",color:"#2C2C2C"}}
+                  />
+                </div>
+              )}
+              {!items.length&&sec.id!=="parking"&&<div style={{padding:"6px 16px",fontSize:12,color:"#CCC",fontStyle:"italic"}}>Empty</div>}
               {items.map(t=><TaskRow key={t.id} {...rowProps(t,sec)} />)}
             </div>
           );
