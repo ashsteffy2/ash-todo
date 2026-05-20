@@ -793,8 +793,27 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
   const [showNotes,setShowNotes] = useState(false);
   const touchStartX = useRef(null);
 
+  // Build the recurrence label shown in list view.
+  // Multi-Day gets smart labels: Weekdays (M-F), Weekends (Sat+Sun),
+  // or short day names like "Mon/Wed/Fri" for other combos.
+  const multiDayLabel = days => {
+    if (!Array.isArray(days) || !days.length) return "Multi-Day";
+    const set = new Set(days);
+    const isWeekdays = set.size===5 && [1,2,3,4,5].every(d=>set.has(d));
+    if (isWeekdays) return "Weekdays";
+    const isWeekends = set.size===2 && set.has(0) && set.has(6);
+    if (isWeekends) return "Weekends";
+    // Show in canonical Sun→Sat order
+    const SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    return [0,1,2,3,4,5,6].filter(d=>set.has(d)).map(d=>SHORT[d]).join("/");
+  };
+
   const rl = task.recurType && task.recurType!=="None"
-    ? ` (${task.recurType==="Every X" ? `Every ${task.recurInterval||1} ${task.recurUnit||"Days"}` : task.recurType})`
+    ? ` (${
+        task.recurType==="Every X" ? `Every ${task.recurInterval||1} ${task.recurUnit||"Days"}`
+        : task.recurType==="Multi-Day" ? multiDayLabel(task.recurDays)
+        : task.recurType
+      })`
     : "";
 
   const handleTouchStart = e => { touchStartX.current=e.touches[0].clientX; };
@@ -963,6 +982,9 @@ export default function App({ session, signOut }) {
   // Save changes to Supabase (debounced to avoid hammering on every keystroke)
   const saveTimerRef = useRef(null);
   const lastSavedRef = useRef("");
+  // Tracks dbIds with a save in flight — used to suppress echo from our own
+  // realtime broadcasts and to avoid clobbering in-flight edits.
+  const pendingSaveIdsRef = useRef(new Set());
   useEffect(()=>{
     if (!loaded || !session) return;
     const snapshot = JSON.stringify(tasks);
@@ -976,6 +998,9 @@ export default function App({ session, signOut }) {
         const userId = session.user.id;
         const newTasks = tasks.filter(t => !t.dbId);
         const existingTasks = tasks.filter(t => t.dbId);
+
+        // Mark tasks as having a save in flight so realtime echoes are ignored.
+        existingTasks.forEach(t => pendingSaveIdsRef.current.add(t.dbId));
 
         // Upsert existing
         if (existingTasks.length) {
@@ -1001,6 +1026,7 @@ export default function App({ session, signOut }) {
             .select("id");
           if (error) throw error;
           // Assign new dbIds back to the corresponding tasks in state
+          inserted.forEach(row => pendingSaveIdsRef.current.add(row.id));
           setTasks(prev => prev.map((t, i) => {
             if (t.dbId) return t;
             const newIdx = newTasks.indexOf(t);
@@ -1012,6 +1038,12 @@ export default function App({ session, signOut }) {
         lastSavedRef.current = JSON.stringify(tasks);
         setSaved("Saved");
         setTimeout(()=>setSaved(""), 1500);
+        // Clear pending flags after a short grace period — long enough for the
+        // realtime broadcast of our own write to arrive and be filtered out.
+        const justSaved = [...existingTasks.map(t=>t.dbId)];
+        setTimeout(() => {
+          justSaved.forEach(id => pendingSaveIdsRef.current.delete(id));
+        }, 2000);
       } catch (err) {
         console.error("Save failed:", err);
         setSaved("Save failed");
@@ -1020,6 +1052,56 @@ export default function App({ session, signOut }) {
     }, 800);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
   },[tasks, loaded, session]);
+
+  // Realtime sync: listen for changes from other devices/tabs.
+  // Supabase broadcasts INSERT / UPDATE / DELETE events on the tasks table.
+  // We filter to the current user and ignore echoes of our own saves.
+  useEffect(() => {
+    if (!loaded || !session) return;
+    const userId = session.user.id;
+    const channel = supabase
+      .channel(`tasks-sync-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "tasks", filter: `user_id=eq.${userId}` },
+        payload => {
+          const { eventType, new: newRow, old: oldRow } = payload;
+
+          if (eventType === "DELETE") {
+            // Drop the task locally if it was deleted on another device
+            setTasks(prev => prev.filter(t => t.dbId !== oldRow.id));
+            return;
+          }
+
+          // INSERT or UPDATE: skip if this is an echo of our own in-flight save
+          if (pendingSaveIdsRef.current.has(newRow.id)) return;
+
+          const incoming = nrmTask({ ...newRow.data, dbId: newRow.id });
+
+          setTasks(prev => {
+            const idx = prev.findIndex(t => t.dbId === newRow.id);
+            if (idx === -1) {
+              // New task created on another device — append it.
+              // Also guard against duplicate inserts (e.g. if we just inserted
+              // a task locally and the realtime event arrives before our dbId is set).
+              if (prev.some(t => t.dbId === newRow.id)) return prev;
+              // Update lastSavedRef so the save effect doesn't immediately re-save this
+              const next = [...prev, incoming];
+              lastSavedRef.current = JSON.stringify(next);
+              return next;
+            }
+            // Update existing task. Update lastSavedRef so the save effect
+            // doesn't see the realtime-applied change as a local dirty edit.
+            const next = prev.map(t => t.dbId === newRow.id ? incoming : t);
+            lastSavedRef.current = JSON.stringify(next);
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [loaded, session]);
 
   const doMigr = yes => {
     setTasks(yes ? migr.map(t=>({...t,area:MIGRATION_MAP[t.area]||t.area})) : migr);
