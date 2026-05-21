@@ -1,0 +1,40 @@
+# Netlify configuration for ash-todo
+# Purpose: stop iOS Safari (and other browsers) from serving a stale index.html,
+# which was causing the app to run old cached JavaScript.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# --- SPA fallback ---------------------------------------------------------
+# Vite builds a single-page app. Any unknown path should serve index.html
+# so client-side routing / deep links work.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# --- Cache headers --------------------------------------------------------
+# index.html must NEVER be cached. It is tiny and it is the file that points
+# at the current hashed JS/CSS bundles. If it is cached, the browser keeps
+# loading yesterday's bundles -> stale code. no-store forces a fresh fetch
+# every load, so a new deploy is picked up immediately.
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-store, no-cache, must-revalidate, max-age=0"
+
+# Also protect the root path itself (served as index.html).
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-store, no-cache, must-revalidate, max-age=0"
+
+# Vite emits content-hashed filenames in /assets (e.g. index-a1b2c3.js).
+# Those are safe to cache aggressively & permanently: a code change produces
+# a new filename, so there is never a stale-content risk here. Caching them
+# hard keeps the app fast.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
