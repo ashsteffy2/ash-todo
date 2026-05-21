@@ -913,6 +913,7 @@ export default function App({ session, signOut }) {
   const [view,setView] = useState("both");
   const [filter,setFilter] = useState("");
   const [saved,setSaved] = useState("");
+  const [rtStatus,setRtStatus] = useState("connecting…"); // TEMP DEBUG: realtime connection status
   const [showExp,setShowExp] = useState(false);
   const [imp,setImp] = useState(null);
   const [migr,setMigr] = useState(null);
@@ -1065,6 +1066,7 @@ export default function App({ session, signOut }) {
         "postgres_changes",
         { event: "*", schema: "public", table: "tasks", filter: `user_id=eq.${userId}` },
         payload => {
+          console.log("[realtime] event received:", payload.eventType, payload); // TEMP DEBUG
           const { eventType, new: newRow, old: oldRow } = payload;
 
           if (eventType === "DELETE") {
@@ -1098,7 +1100,11 @@ export default function App({ session, signOut }) {
           });
         }
       )
-      .subscribe();
+      .subscribe((status, err) => {
+        // TEMP DEBUG: surface subscription status on screen and in console
+        console.log("[realtime] subscription status:", status, err || "");
+        setRtStatus(status + (err ? ` (${err.message||err})` : ""));
+      });
 
     return () => { supabase.removeChannel(channel); };
   }, [loaded, session]);
@@ -1234,6 +1240,7 @@ export default function App({ session, signOut }) {
             {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
             {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
             {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
+            <span style={{marginLeft:8,color:rtStatus==="SUBSCRIBED"?"#27AE60":"#C0392B",fontWeight:"bold"}}>RT:{rtStatus}</span>
           </span>
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
