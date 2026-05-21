@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./supabaseClient";
 
 const SECTIONS = [
@@ -913,8 +913,6 @@ export default function App({ session, signOut }) {
   const [view,setView] = useState("both");
   const [filter,setFilter] = useState("");
   const [saved,setSaved] = useState("");
-  const [rtStatus,setRtStatus] = useState("connecting…"); // TEMP DEBUG: realtime connection status
-  const [rtEvents,setRtEvents] = useState(0); // TEMP DEBUG: count of realtime events received
   const [showExp,setShowExp] = useState(false);
   const [imp,setImp] = useState(null);
   const [migr,setMigr] = useState(null);
@@ -958,94 +956,136 @@ export default function App({ session, signOut }) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // Fetch tasks from Supabase when the user signs in
+  // Per-task save baseline: maps task.id -> JSON of the last form we know is
+  // persisted in Supabase. Used to detect which individual tasks changed so we
+  // write ONLY those rows (never re-saving untouched tasks). This is what
+  // prevents a stale device from clobbering tasks it didn't edit.
+  const savedTaskJsonRef = useRef(new Map());
+
+  // Serialize just the persisted fields of a task (excludes dbId and internal
+  // _updatedAt) so the baseline comparison is stable across loads/saves.
+  const taskPersistJson = t => {
+    const { dbId, _updatedAt, ...rest } = t;
+    return JSON.stringify(rest);
+  };
+
+  // Fetch all tasks from Supabase and replace local state. Used on sign-in and
+  // on window/tab focus (to heal staleness). Re-seeds the per-task save baseline
+  // so freshly-loaded data isn't treated as a local edit and re-saved.
+  const loadFromSupabase = useCallback(async () => {
+    if (!session) return;
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id, data, updated_at")
+      .order("id", { ascending: true });
+    if (error) {
+      console.error("Failed to load tasks:", error);
+    } else {
+      // Each row: { id, data: {...task fields}, updated_at }.
+      const baseline = new Map();
+      const loaded = data.map(row => {
+        const t = nrmTask({ ...row.data, dbId: row.id });
+        t._updatedAt = row.updated_at || null;
+        baseline.set(t.id, taskPersistJson(t));
+        return t;
+      });
+      savedTaskJsonRef.current = baseline;
+      setTasks(loaded);
+    }
+  }, [session]);
+
+  // Initial load when the user signs in.
   useEffect(()=>{
     if (!session) return;
-    const loadFromSupabase = async () => {
-      const { data, error } = await supabase
-        .from("tasks")
-        .select("id, data")
-        .order("id", { ascending: true });
-      if (error) {
-        console.error("Failed to load tasks:", error);
-        setTasks([]);
-      } else {
-        // Each row: { id, data: {...task fields} }. We unpack data into the task and keep the row id.
-        const loaded = data.map(row => nrmTask({ ...row.data, dbId: row.id }));
-        setTasks(loaded);
-      }
+    (async () => {
+      await loadFromSupabase();
       try{ const a=JSON.parse(localStorage.getItem("ash-areas")); if(a&&a.length)setAreas(a); }catch{}
       try{ const p=JSON.parse(localStorage.getItem("ash-projects")); if(p&&p.length)setProjects(p); }catch{}
       setLoaded(true);
-    };
-    loadFromSupabase();
-  },[session]);
+    })();
+  },[session, loadFromSupabase]);
 
-  // Save changes to Supabase (debounced to avoid hammering on every keystroke)
+  // Refresh-on-focus: when this tab/window regains focus (or becomes visible
+  // again after being backgrounded), re-fetch from Supabase. This heals any
+  // staleness that accumulated while the tab was inactive — the device picks up
+  // edits made elsewhere before the user can make a conflicting edit.
+  // We skip the refresh if there are unsaved local edits, so a focus event can't
+  // discard work that hasn't been persisted yet (the pending save will run and
+  // realtime will reconcile).
+  const tasksRef = useRef(tasks);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+  useEffect(() => {
+    if (!loaded || !session) return;
+    const hasUnsavedEdits = () => {
+      const baseline = savedTaskJsonRef.current;
+      return tasksRef.current.some(t => !t.dbId || baseline.get(t.id) !== taskPersistJson(t));
+    };
+    const refresh = () => { if (!hasUnsavedEdits()) loadFromSupabase(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [loaded, session, loadFromSupabase]);
+
+  // Save changes to Supabase. Debounced, and crucially PER-TASK: on each change
+  // we compute which individual tasks differ from their saved baseline and write
+  // ONLY those rows. Untouched tasks are never rewritten, so a stale device can
+  // never overwrite tasks it didn't edit, and one edit broadcasts at most one
+  // realtime event (no event-storm).
   const saveTimerRef = useRef(null);
-  const lastSavedRef = useRef("");
-  // Tracks dbIds with a save in flight — used to suppress echo from our own
-  // realtime broadcasts and to avoid clobbering in-flight edits.
-  const pendingSaveIdsRef = useRef(new Set());
   useEffect(()=>{
     if (!loaded || !session) return;
-    const snapshot = JSON.stringify(tasks);
-    if (snapshot === lastSavedRef.current) return;
+
+    // Determine which tasks are new (no dbId) or changed (dbId + differing JSON).
+    const baseline = savedTaskJsonRef.current;
+    const dirty = tasks.filter(t => {
+      if (!t.dbId) return true; // new, needs insert
+      return baseline.get(t.id) !== taskPersistJson(t); // changed
+    });
+    if (!dirty.length) return;
+
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     setSaved("Saving…");
     saveTimerRef.current = setTimeout(async () => {
+      const userId = session.user.id;
+      const nowIso = new Date().toISOString();
+      const newTasks = dirty.filter(t => !t.dbId);
+      const changedTasks = dirty.filter(t => t.dbId);
+
       try {
-        // Strategy: per-task upsert. Each task has dbId (set after first save).
-        // Tasks without dbId are inserted; with dbId are updated.
-        const userId = session.user.id;
-        const newTasks = tasks.filter(t => !t.dbId);
-        const existingTasks = tasks.filter(t => t.dbId);
-
-        // Mark tasks as having a save in flight so realtime echoes are ignored.
-        existingTasks.forEach(t => pendingSaveIdsRef.current.add(t.dbId));
-
-        // Upsert existing
-        if (existingTasks.length) {
-          const rows = existingTasks.map(t => ({
-            id: t.dbId,
-            user_id: userId,
-            data: { ...t, dbId: undefined },
-            updated_at: new Date().toISOString(),
-          }));
-          const { error } = await supabase.from("tasks").upsert(rows);
+        // Update each changed task individually (one row per write).
+        for (const t of changedTasks) {
+          const { dbId, _updatedAt, ...persist } = t;
+          const { error } = await supabase
+            .from("tasks")
+            .update({ data: persist, updated_at: nowIso })
+            .eq("id", dbId);
           if (error) throw error;
+          // Record the persisted form + timestamp as the new baseline.
+          savedTaskJsonRef.current.set(t.id, taskPersistJson(t));
+          setTasks(prev => prev.map(x => x.id === t.id ? { ...x, _updatedAt: nowIso } : x));
         }
 
-        // Insert new (and capture their new IDs back into state)
-        if (newTasks.length) {
-          const rows = newTasks.map(t => ({
-            user_id: userId,
-            data: { ...t, dbId: undefined },
-          }));
+        // Insert new tasks, capturing their generated row ids back into state.
+        for (const t of newTasks) {
+          const { dbId, _updatedAt, ...persist } = t;
           const { data: inserted, error } = await supabase
             .from("tasks")
-            .insert(rows)
-            .select("id");
+            .insert({ user_id: userId, data: persist, updated_at: nowIso })
+            .select("id, updated_at")
+            .single();
           if (error) throw error;
-          // Assign new dbIds back to the corresponding tasks in state
-          inserted.forEach(row => pendingSaveIdsRef.current.add(row.id));
-          setTasks(prev => prev.map((t, i) => {
-            if (t.dbId) return t;
-            const newIdx = newTasks.indexOf(t);
-            if (newIdx === -1) return t;
-            return { ...t, dbId: inserted[newIdx].id };
-          }));
+          savedTaskJsonRef.current.set(t.id, taskPersistJson(t));
+          setTasks(prev => prev.map(x =>
+            x.id === t.id ? { ...x, dbId: inserted.id, _updatedAt: inserted.updated_at || nowIso } : x
+          ));
         }
 
-        lastSavedRef.current = JSON.stringify(tasks);
         setSaved("Saved");
         setTimeout(()=>setSaved(""), 1500);
-        // Clear pending flags after a short grace period — long enough for the
-        // realtime broadcast of our own write to arrive and be filtered out.
-        const justSaved = [...existingTasks.map(t=>t.dbId)];
-        setTimeout(() => {
-          justSaved.forEach(id => pendingSaveIdsRef.current.delete(id));
-        }, 2000);
       } catch (err) {
         console.error("Save failed:", err);
         setSaved("Save failed");
@@ -1057,7 +1097,11 @@ export default function App({ session, signOut }) {
 
   // Realtime sync: listen for changes from other devices/tabs.
   // Supabase broadcasts INSERT / UPDATE / DELETE events on the tasks table.
-  // We filter to the current user and ignore echoes of our own saves.
+  // We filter to the current user. Because writes are now per-task, an incoming
+  // event maps to exactly one task. We apply last-write-wins by updated_at so a
+  // late-arriving older write can't clobber a newer local value, and we keep the
+  // per-task save baseline in sync so applying a remote change isn't mistaken
+  // for a local edit (which would echo it back).
   useEffect(() => {
     if (!loaded || !session) return;
     const userId = session.user.id;
@@ -1067,46 +1111,46 @@ export default function App({ session, signOut }) {
         "postgres_changes",
         { event: "*", schema: "public", table: "tasks", filter: `user_id=eq.${userId}` },
         payload => {
-          console.log("[realtime] event received:", payload.eventType, payload); // TEMP DEBUG
-          setRtEvents(n => n + 1); // TEMP DEBUG: count every event that arrives
           const { eventType, new: newRow, old: oldRow } = payload;
 
           if (eventType === "DELETE") {
-            // Drop the task locally if it was deleted on another device
-            setTasks(prev => prev.filter(t => t.dbId !== oldRow.id));
+            // Drop the task locally if it was deleted on another device.
+            setTasks(prev => {
+              const gone = prev.find(t => t.dbId === oldRow.id);
+              if (gone) savedTaskJsonRef.current.delete(gone.id);
+              return prev.filter(t => t.dbId !== oldRow.id);
+            });
             return;
           }
 
-          // INSERT or UPDATE: skip if this is an echo of our own in-flight save
-          if (pendingSaveIdsRef.current.has(newRow.id)) return;
-
+          // INSERT or UPDATE.
           const incoming = nrmTask({ ...newRow.data, dbId: newRow.id });
+          incoming._updatedAt = newRow.updated_at || null;
 
           setTasks(prev => {
             const idx = prev.findIndex(t => t.dbId === newRow.id);
             if (idx === -1) {
-              // New task created on another device — append it.
-              // Also guard against duplicate inserts (e.g. if we just inserted
-              // a task locally and the realtime event arrives before our dbId is set).
-              if (prev.some(t => t.dbId === newRow.id)) return prev;
-              // Update lastSavedRef so the save effect doesn't immediately re-save this
-              const next = [...prev, incoming];
-              lastSavedRef.current = JSON.stringify(next);
-              return next;
+              // Task we don't have yet. Guard against a race where our own insert's
+              // dbId hasn't been written back to state — match by persisted content.
+              const incomingJson = taskPersistJson(incoming);
+              if (prev.some(t => !t.dbId && taskPersistJson(t) === incomingJson)) return prev;
+              savedTaskJsonRef.current.set(incoming.id, incomingJson);
+              return [...prev, incoming];
             }
-            // Update existing task. Update lastSavedRef so the save effect
-            // doesn't see the realtime-applied change as a local dirty edit.
-            const next = prev.map(t => t.dbId === newRow.id ? incoming : t);
-            lastSavedRef.current = JSON.stringify(next);
-            return next;
+            const current = prev[idx];
+            // Last-write-wins: ignore an incoming row that isn't newer than what
+            // we have. (Our own just-saved echo lands here and is a no-op.)
+            if (current._updatedAt && incoming._updatedAt && incoming._updatedAt <= current._updatedAt) {
+              return prev;
+            }
+            // Preserve the local task id so baseline keys stay consistent.
+            const merged = { ...incoming, id: current.id };
+            savedTaskJsonRef.current.set(merged.id, taskPersistJson(merged));
+            return prev.map((t,i) => i === idx ? merged : t);
           });
         }
       )
-      .subscribe((status, err) => {
-        // TEMP DEBUG: surface subscription status on screen and in console
-        console.log("[realtime] subscription status:", status, err || "");
-        setRtStatus(status + (err ? ` (${err.message||err})` : ""));
-      });
+      .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, [loaded, session]);
@@ -1145,6 +1189,7 @@ export default function App({ session, signOut }) {
   const delTask = async (id) => {
     const t = tasks.find(x => x.id === id);
     setTasksWithHistory(p => p.filter(x => x.id !== id));
+    savedTaskJsonRef.current.delete(id);
     if (t?.dbId) {
       const { error } = await supabase.from("tasks").delete().eq("id", t.dbId);
       if (error) console.error("Delete failed:", error);
@@ -1242,7 +1287,6 @@ export default function App({ session, signOut }) {
             {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
             {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
             {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
-            <span style={{marginLeft:8,color:rtStatus==="SUBSCRIBED"?"#27AE60":"#C0392B",fontWeight:"bold"}}>RT:{rtStatus} ⟳{rtEvents}</span>
           </span>
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
