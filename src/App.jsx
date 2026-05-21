@@ -231,7 +231,7 @@ const DEFAULT_TASKS = [
 ];
 
 const S = {
-  app: {fontFamily:"Georgia,serif",background:"#FFFFFF",minHeight:"100vh",color:"#2C2C2C",maxWidth:"100%",overflowX:"hidden"},
+  app: {fontFamily:"Georgia,serif",background:"#FFFFFF",minHeight:"100vh",color:"#2C2C2C",maxWidth:"100%"},
   input: {fontFamily:"Georgia,serif",padding:"5px 8px",border:"1px solid #CCC",borderRadius:4,fontSize:14,background:"#FFF"},
   btn: {fontFamily:"Georgia,serif",cursor:"pointer",padding:"4px 10px",border:"1px solid #CCC",borderRadius:4,fontSize:13,background:"#FFF"},
   tog: on => ({fontFamily:"Georgia,serif",cursor:"pointer",padding:"3px 10px",border:`1px solid ${on?"#2C2C2C":"#CCC"}`,borderRadius:4,fontSize:12,background:on?"#2C2C2C":"#FFF",color:on?"#FFF":"#555"}),
@@ -1577,19 +1577,31 @@ export default function App({ session, signOut }) {
 
   return (
     <div style={S.app}>
+      {/* Sticky bar: ONLY the title + scroll-to-top + avatar line stays pinned. */}
       <div style={{position:"sticky",top:0,zIndex:100,background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",flex:1,minWidth:0}}>
-            <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
+            <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash To Do</span>
             <span style={{fontSize:isMobile?13:12,color:"#999",fontFamily:"monospace"}}>
-              {nAct} active · {nDone} done
-              {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
-              {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
-              {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
+              {!isMobile && <>
+                {nAct} active · {nDone} done
+                {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
+                {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
+              </>}
+              {saved&&<span style={{marginLeft:isMobile?0:8,color:"#27AE60"}}>{saved}</span>}
             </span>
           </div>
+          <button
+            onClick={()=>window.scrollTo({top:0,behavior:"smooth"})}
+            aria-label="Scroll to top"
+            title="Back to top"
+            style={{flexShrink:0,width:isMobile?32:28,height:isMobile?32:28,borderRadius:"50%",border:"1px solid #DDD",background:"#FFF",color:"#888",fontSize:isMobile?17:15,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
+          >↑</button>
           <AccountMenu session={session} signOut={signOut} isMobile={isMobile} />
         </div>
+      </div>
+      {/* Non-sticky controls: export (desktop), view toggles + search. Scrolls away. */}
+      <div style={{background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"6px 16px 8px"}}>
         {!isMobile && <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
           <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>
           <label style={S.btn}>
