@@ -1165,6 +1165,35 @@ const AccountMenu = ({ session, signOut, isMobile }) => {
 
 export default function App({ session, signOut }) {
   const isMobile = useIsMobile();
+  const appRootRef = useRef(null);
+
+  // Robust "back to top": the scrollable element isn't necessarily the window
+  // (an ancestor container may be the scroller), so scrolling window alone can
+  // do nothing. We reset the window AND walk up from the app root to find the
+  // nearest actually-scrolling ancestor and reset that too.
+  const scrollToTop = () => {
+    // Primary: let the browser resolve the correct scroll container and align
+    // the app's top edge to it. This works regardless of whether the scroller is
+    // the window, the app root, or an ancestor wrapper.
+    try { appRootRef.current && appRootRef.current.scrollIntoView({ block: "start" }); } catch {}
+    // Fallbacks: reset window and any scrolling ancestor directly.
+    try { window.scrollTo(0, 0); } catch {}
+    try {
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    } catch {}
+    let el = appRootRef.current;
+    while (el) {
+      if (el.scrollHeight > el.clientHeight) {
+        const oy = getComputedStyle(el).overflowY;
+        if (oy === "auto" || oy === "scroll" || el === document.scrollingElement) {
+          el.scrollTop = 0;
+        }
+      }
+      el = el.parentElement;
+    }
+  };
+
   const [tasks,setTasks] = useState([]);
   const [loaded,setLoaded] = useState(false);
   const [areas,setAreas] = useState(["Work","Personal"]);
@@ -1576,7 +1605,7 @@ export default function App({ session, signOut }) {
   });
 
   return (
-    <div style={S.app}>
+    <div style={S.app} ref={appRootRef}>
       {/* Sticky bar: ONLY the title + scroll-to-top + avatar line stays pinned. */}
       <div style={{position:"sticky",top:0,zIndex:100,background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -1592,7 +1621,7 @@ export default function App({ session, signOut }) {
             </span>
           </div>
           <button
-            onClick={()=>window.scrollTo(0,0)}
+            onClick={scrollToTop}
             aria-label="Scroll to top"
             title="Back to top"
             style={{flexShrink:0,width:isMobile?32:28,height:isMobile?32:28,borderRadius:"50%",border:"1px solid #DDD",background:"#FFF",color:"#888",fontSize:isMobile?17:15,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
