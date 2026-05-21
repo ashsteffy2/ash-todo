@@ -1,11 +1,35 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./supabaseClient";
 
+// Detects a phone-width viewport. Used to apply mobile-only layout tweaks
+// (larger fonts, hidden import/export pills, roomier tap targets, etc.).
+const useIsMobile = (breakpoint = 600) => {
+  const query = `(max-width: ${breakpoint}px)`;
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia(query).matches
+      : false
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mql = window.matchMedia(query);
+    const onChange = e => setIsMobile(e.matches);
+    setIsMobile(mql.matches);
+    // addEventListener is the modern API; addListener is the Safari fallback.
+    if (mql.addEventListener) mql.addEventListener("change", onChange);
+    else mql.addListener(onChange);
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener("change", onChange);
+      else mql.removeListener(onChange);
+    };
+  }, [query]);
+  return isMobile;
+};
+
 const SECTIONS = [
   { id: "parking", label: "Parking Lot", color: "#8B7355" },
   { id: "today", label: "Today", color: "#C0392B" },
-  { id: "wf-urgent", label: "Waiting For — Urgent", color: "#8E44AD" },
-  { id: "wf-other", label: "Waiting For — Other", color: "#7D3C98" },
+  { id: "wf-overdue", label: "Waiting For — Overdue", color: "#8E44AD" },
   { id: "after", label: "After Today", color: "#E67E22" },
   { id: "noschedule", label: "No Schedule", color: "#7F8C8D" },
   { id: "done", label: "Done", color: "#AAB7B8" },
@@ -35,8 +59,10 @@ const deriveSection = task => {
   if (task.done) return "done";
   // Pinned to parking lot: stay in parking until explicitly moved out
   if (task.pinnedToParking) return "parking";
-  if (task.state==="Waiting For" && task.priority==="High") return "wf-urgent";
-  if (task.state==="Waiting For") return "wf-other";
+  // Waiting For + overdue (due date in the past) surfaces in the dedicated
+  // "Waiting For — Overdue" section. Any other Waiting For task falls through to
+  // normal placement below (by recurrence / due date / explicit section).
+  if (task.state==="Waiting For" && task.dueDate && task.dueDate<today) return "wf-overdue";
   if (task.recurType && task.recurType!=="None") {
     // Recurring tasks: due today (or recurring today) → Today; otherwise After Today
     if (isRecurringToday(task) || (task.dueDate && task.dueDate<=today)) return "today";
@@ -52,6 +78,9 @@ const deriveSection = task => {
   if (task.section==="noschedule") return "noschedule";
   if (task.section==="today") return "today";
   if (task.section==="after") return "after";
+  // A dateless Waiting For task with no explicit section belongs in No Schedule
+  // (it's waiting on something, not parked). Other dateless tasks default to Parking.
+  if (task.state==="Waiting For") return "noschedule";
   return "parking";
 };
 
@@ -182,7 +211,7 @@ const DEFAULT_TASKS = [
 ];
 
 const S = {
-  app: {fontFamily:"Georgia,serif",background:"#FAFAF7",minHeight:"100vh",color:"#2C2C2C"},
+  app: {fontFamily:"Georgia,serif",background:"#FFFFFF",minHeight:"100vh",color:"#2C2C2C",maxWidth:"100%",overflowX:"hidden"},
   input: {fontFamily:"Georgia,serif",padding:"5px 8px",border:"1px solid #CCC",borderRadius:4,fontSize:14,background:"#FFF"},
   btn: {fontFamily:"Georgia,serif",cursor:"pointer",padding:"4px 10px",border:"1px solid #CCC",borderRadius:4,fontSize:13,background:"#FFF"},
   tog: on => ({fontFamily:"Georgia,serif",cursor:"pointer",padding:"3px 10px",border:`1px solid ${on?"#2C2C2C":"#CCC"}`,borderRadius:4,fontSize:12,background:on?"#2C2C2C":"#FFF",color:on?"#FFF":"#555"}),
@@ -190,7 +219,7 @@ const S = {
   row: {marginBottom:14},
   overlay: {position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-start",justifyContent:"center",overflowY:"auto",padding:"20px 0"},
   modal: {background:"#FFF",borderRadius:8,padding:24,width:"min(600px,95vw)",position:"relative",margin:"auto"},
-  popover: {position:"absolute",top:"calc(100% + 4px)",left:0,zIndex:80,background:"#FFF",border:"1px solid #DDD",borderRadius:6,padding:8,boxShadow:"0 4px 12px rgba(0,0,0,.12)",minWidth:160},
+  popover: {position:"absolute",top:"calc(100% + 4px)",left:0,zIndex:80,background:"#FFF",border:"1px solid #DDD",borderRadius:6,padding:8,boxShadow:"0 4px 12px rgba(0,0,0,.12)",minWidth:160,maxWidth:"calc(100vw - 24px)"},
 };
 
 const Tog = ({active,onClick,children,color}) => (
@@ -387,7 +416,14 @@ const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onPro
           <div style={S.row}>
             <label style={S.lbl}>Where</label>
             <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              {whereOpts.map(w=><Tog key={w} active={secToWhere(t.section)===w} onClick={()=>setT(p=>({...p,section:whereToSec(w)}))}>{w}</Tog>)}
+              {whereOpts.map(w=><Tog key={w} active={secToWhere(t.section)===w} onClick={()=>setT(p=>{
+                const sec = whereToSec(w);
+                // Moving to Today stamps today's due date so placement is
+                // unambiguous (a dateless task can't also be "Today"). Keep an
+                // existing due date if the user already set one.
+                if (sec==="today" && !p.dueDate) return {...p, section:sec, dueDate:todayStr()};
+                return {...p, section:sec};
+              })}>{w}</Tog>)}
             </div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
@@ -562,7 +598,7 @@ const CalendarPicker = ({value, onSelect, onClear, onClose}) => {
   );
 };
 
-const InlineDate = ({task, onSave, rowHovered}) => {
+const InlineDate = ({task, onSave, rowHovered, isMobile}) => {
   const [open, setOpen] = useState(false);
   const popoverRef = usePopover(open, () => setOpen(false));
   const today = todayStr();
@@ -576,9 +612,10 @@ const InlineDate = ({task, onSave, rowHovered}) => {
     onSave({...task, dueDate: null});
   };
 
+  const dfs = isMobile ? 12 : 11;
   const labelStyle = task.dueDate
-    ? {fontSize:11,fontWeight:"bold",color:isOverdue?"#C0392B":"#888",background:isOverdue?"#FADBD8":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}
-    : {fontSize:11,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",userSelect:"none",whiteSpace:"nowrap"};
+    ? {fontSize:dfs,fontWeight:"bold",color:isOverdue?"#C0392B":"#888",background:isOverdue?"#FADBD8":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}
+    : {fontSize:dfs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",userSelect:"none",whiteSpace:"nowrap"};
 
   const labelText = task.dueDate ? `${isOverdue?"⚠ ":""}${task.dueDate}` : "No date";
 
@@ -651,16 +688,17 @@ const InlinePriority = ({task, onSave}) => {
   );
 };
 
-const InlineArea = ({task, onSave, areas}) => {
+const InlineArea = ({task, onSave, areas, isMobile}) => {
   const [open, setOpen] = useState(false);
   const ref = usePopover(open, () => setOpen(false));
   const aStale = task.area && !areas.includes(task.area);
+  const afs = isMobile ? 12 : 11;
   const trigger = task.area ? (
-    <span style={{fontSize:11,fontWeight:"bold",color:aStale?"#E67E22":"#888",textTransform:"uppercase",letterSpacing:".04em",background:aStale?"#FEF9EF":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer"}}>
+    <span style={{fontSize:afs,fontWeight:"bold",color:aStale?"#E67E22":"#888",textTransform:"uppercase",letterSpacing:".04em",background:aStale?"#FEF9EF":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer"}}>
       {aStale&&"⚠ "}{task.area}
     </span>
   ) : (
-    <span style={{fontSize:11,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",textTransform:"uppercase",letterSpacing:".04em"}}>+ area</span>
+    <span style={{fontSize:afs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",textTransform:"uppercase",letterSpacing:".04em"}}>+ area</span>
   );
   return (
     <span ref={ref} style={{position:"relative",display:"inline-block"}}>
@@ -675,11 +713,12 @@ const InlineArea = ({task, onSave, areas}) => {
   );
 };
 
-const InlineProject = ({task, onSave, projects, onProjectsChange}) => {
+const InlineProject = ({task, onSave, projects, onProjectsChange, isMobile}) => {
   const [open, setOpen] = useState(false);
   const [newProj, setNewProj] = useState("");
   const ref = usePopover(open, () => setOpen(false));
   const pStale = task.project && !projects.includes(task.project);
+  const pfs = isMobile ? 12 : 11;
 
   const addProj = () => {
     const v = newProj.trim();
@@ -693,11 +732,11 @@ const InlineProject = ({task, onSave, projects, onProjectsChange}) => {
   };
 
   const trigger = task.project ? (
-    <span style={{fontSize:11,fontWeight:"bold",color:pStale?"#E67E22":"#2471A3",background:pStale?"#FEF9EF":"#EAF2FB",padding:"1px 6px",borderRadius:10,cursor:"pointer"}}>
+    <span style={{fontSize:pfs,fontWeight:"bold",color:pStale?"#E67E22":"#2471A3",background:pStale?"#FEF9EF":"#EAF2FB",padding:"1px 6px",borderRadius:10,cursor:"pointer"}}>
       {pStale&&"⚠ "}{task.project}
     </span>
   ) : (
-    <span style={{fontSize:11,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD"}}>+ project</span>
+    <span style={{fontSize:pfs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD"}}>+ project</span>
   );
 
   return (
@@ -719,11 +758,12 @@ const InlineProject = ({task, onSave, projects, onProjectsChange}) => {
   );
 };
 
-const InlineStakeholders = ({task, onSave}) => {
+const InlineStakeholders = ({task, onSave, isMobile}) => {
   const [open, setOpen] = useState(false);
   const [other, setOther] = useState("");
   const ref = usePopover(open, () => setOpen(false));
   const sh = task.stakeholders || [];
+  const sfs = isMobile ? 12 : 11;
   const togSH = s => {
     const next = sh.includes(s) ? sh.filter(x=>x!==s) : [...sh, s];
     onSave({...task, stakeholders: next});
@@ -737,7 +777,7 @@ const InlineStakeholders = ({task, onSave}) => {
 
   return (
     <span ref={ref} style={{position:"relative",display:"inline-block"}}>
-      <span onClick={e=>{e.stopPropagation();setOpen(o=>!o);}} style={{cursor:"pointer",fontSize:11,color:"#888",borderBottom:sh.length?"none":"1px dashed #DDD"}}>
+      <span onClick={e=>{e.stopPropagation();setOpen(o=>!o);}} style={{cursor:"pointer",fontSize:sfs,color:"#888",borderBottom:sh.length?"none":"1px dashed #DDD"}}>
         {sh.length ? sh.map(s=>`(${s})`).join(" ") : "+ who"}
       </span>
       {open && (
@@ -787,7 +827,7 @@ const InlineText = ({value, onSave, placeholder, style, multiline=false, taskDon
   return <span onClick={e=>{e.stopPropagation();setEditing(true);}} style={{...style, cursor:"text", textDecoration:taskDone?"line-through":"none"}}>{value}</span>;
 };
 
-const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveToTasks,onDuplicate,onPinToParking,isParking,areas,projects,onProjectsChange}) => {
+const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveToTasks,onDuplicate,onPinToParking,isParking,areas,projects,onProjectsChange,isMobile}) => {
   const [hovered,setHovered] = useState(false);
   const [editing,setEditing] = useState(false);
   const [showNotes,setShowNotes] = useState(false);
@@ -843,38 +883,48 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
         <button onClick={()=>onToggleDone(task)} style={{width:16,height:16,borderRadius:"50%",border:`1.5px solid ${task.done?"#BBB":"#888"}`,background:task.done?"#BBB":"transparent",cursor:"pointer",flexShrink:0,marginTop:4,padding:0}} />
         <div style={{flex:1,minWidth:0}} onClickCapture={handleEditAreaClick}>
           <div style={{display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px"}}>
-            <InlinePriority task={task} onSave={onSave} />
-            <InlineDate task={task} onSave={onSave} rowHovered={hovered} />
-            {rl && <span style={{fontSize:11,color:"#999",fontStyle:"italic"}}>{rl}</span>}
-            <InlineText
-              value={task.text}
-              onSave={v=>onSave({...task, text:v})}
-              placeholder="(untitled)"
-              taskDone={task.done}
-              style={{fontSize:14, lineHeight:1.4, wordBreak:"break-word"}}
-            />
-            <InlineArea task={task} onSave={onSave} areas={areas} />
+            {/* Leading cluster: priority dot + date + recur label stay together on
+                one line and never wrap apart, so the title always starts beside
+                the date (item 8). On mobile the priority dot gets extra left space
+                to clear the complete button (item 7). */}
+            <span style={{display:"inline-flex",alignItems:"baseline",gap:6,flexShrink:0,...(isMobile?{marginLeft:6}:{})}}>
+              <InlinePriority task={task} onSave={onSave} />
+              <InlineDate task={task} onSave={onSave} rowHovered={hovered} isMobile={isMobile} />
+              {rl && <span style={{fontSize:isMobile?12:11,color:"#999",fontStyle:"italic"}}>{rl}</span>}
+            </span>
+            {/* Title: grows to fill the rest of the first line and wraps its own
+                text inline instead of being pushed below the date as a block. */}
+            <span style={{flex:"1 1 auto",minWidth:0}}>
+              <InlineText
+                value={task.text}
+                onSave={v=>onSave({...task, text:v})}
+                placeholder="(untitled)"
+                taskDone={task.done}
+                style={{fontSize:isMobile?15:14, lineHeight:1.4, wordBreak:"break-word"}}
+              />
+            </span>
+            <InlineArea task={task} onSave={onSave} areas={areas} isMobile={isMobile} />
             <button
               onClick={e=>{e.stopPropagation();onDuplicate(task);}}
               title="Duplicate task"
-              style={{background:"none",border:"none",cursor:"pointer",fontSize:12,padding:"0 2px",color:hovered?"#888":"#CCC",lineHeight:1}}
+              style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:"0 2px",color:hovered?"#888":"#CCC",lineHeight:1}}
             >⎘</button>
-            <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} />
-            <InlineStakeholders task={task} onSave={onSave} />
+            <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} isMobile={isMobile} />
+            <InlineStakeholders task={task} onSave={onSave} isMobile={isMobile} />
             {/* Blocker inline — wraps only if needed */}
             {(task.blocker || hovered) && (
-              <span style={{fontSize:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
+              <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
                 <span style={{color:"#C0392B"}}>→</span>
                 <InlineText
                   value={task.blocker}
                   onSave={v=>onSave({...task, blocker:v})}
                   placeholder="+ blocker"
-                  style={{fontSize:12, color:"#C0392B", fontStyle:"italic"}}
+                  style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
                 />
               </span>
             )}
             {/* Notes toggle inline */}
-            <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
+            <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
               {task.notes&&task.notes.trim() ? (showNotes?"📝 hide":"📋 notes") : (showNotes?"📝 hide":"+ notes")}
             </button>
           </div>
@@ -905,6 +955,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
 };
 
 export default function App({ session, signOut }) {
+  const isMobile = useIsMobile();
   const [tasks,setTasks] = useState([]);
   const [loaded,setLoaded] = useState(false);
   const [areas,setAreas] = useState(["Work","Personal"]);
@@ -954,6 +1005,36 @@ export default function App({ session, signOut }) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // Item 5: lock the layout to the device width and disable pinch/double-tap
+  // zoom (which was letting users scroll parts of the UI off-screen). We set the
+  // viewport meta from JS so it applies regardless of index.html, and hide
+  // horizontal overflow on the root elements so nothing can sit off to the side.
+  useEffect(() => {
+    let meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "viewport";
+      document.head.appendChild(meta);
+    }
+    const prevContent = meta.getAttribute("content");
+    meta.setAttribute(
+      "content",
+      "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    );
+    const prevHtmlOverflowX = document.documentElement.style.overflowX;
+    const prevBodyOverflowX = document.body.style.overflowX;
+    const prevBodyMargin = document.body.style.margin;
+    document.documentElement.style.overflowX = "hidden";
+    document.body.style.overflowX = "hidden";
+    document.body.style.margin = "0";
+    return () => {
+      if (prevContent) meta.setAttribute("content", prevContent);
+      document.documentElement.style.overflowX = prevHtmlOverflowX;
+      document.body.style.overflowX = prevBodyOverflowX;
+      document.body.style.margin = prevBodyMargin;
+    };
   }, []);
 
   // Per-task save baseline: maps task.id -> JSON of the last form we know is
@@ -1225,8 +1306,15 @@ export default function App({ session, signOut }) {
   };
 
   const addToSec = sid => {
-    const sm2={"wf-urgent":"Waiting For","wf-other":"Waiting For"},pm={"wf-urgent":"High"};
-    const t=mkTask({id:genId(),section:sid,state:sm2[sid]||"To Do",priority:pm[sid]||""});
+    // For "Waiting For — Overdue", a new task needs the Waiting For state AND a
+    // past due date, otherwise deriveSection would route it by normal placement.
+    let extra = {};
+    if (sid==="wf-overdue") {
+      const y = new Date(); y.setDate(y.getDate()-1);
+      const yIso = `${y.getFullYear()}-${String(y.getMonth()+1).padStart(2,"0")}-${String(y.getDate()).padStart(2,"0")}`;
+      extra = { state:"Waiting For", dueDate:yIso };
+    }
+    const t=mkTask({id:genId(),section:sid,state:extra.state||"To Do",...extra});
     setTasksWithHistory(p=>[...p,t]);
     setAddingTo(t);
   };
@@ -1274,15 +1362,16 @@ export default function App({ session, signOut }) {
     onMoveToToday:mv2today, onMoveToTasks:mv2tasks, onDuplicate:duplicateTask,
     onPinToParking:pinToParking,
     isParking:sec.id==="parking",
-    onProjectsChange: projectsChangeHandler
+    onProjectsChange: projectsChangeHandler,
+    isMobile,
   });
 
   return (
     <div style={S.app}>
-      <div style={{position:"sticky",top:0,zIndex:100,background:"#FAFAF7",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
+      <div style={{position:"sticky",top:0,zIndex:100,background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
         <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
-          <span style={{fontSize:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
-          <span style={{fontSize:12,color:"#999",fontFamily:"monospace"}}>
+          <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
+          <span style={{fontSize:isMobile?13:12,color:"#999",fontFamily:"monospace"}}>
             {nAct} active · {nDone} done · {session?.user?.email}
             {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
             {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
@@ -1296,8 +1385,8 @@ export default function App({ session, signOut }) {
             title={historyCount===0 ? "Nothing to undo" : `Undo (${historyCount} step${historyCount===1?"":"s"} available)`}
             style={{...S.btn, opacity: historyCount===0 ? 0.4 : 1, cursor: historyCount===0 ? "not-allowed" : "pointer"}}
           >↶ Undo{historyCount>0?` (${historyCount})`:""}</button>
-          <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>
-          <label style={S.btn}>
+          {!isMobile && <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>}
+          {!isMobile && <label style={S.btn}>
             ↑ Import JSON
             <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
               const f=e.target.files[0]; if(!f)return;
@@ -1305,8 +1394,8 @@ export default function App({ session, signOut }) {
               r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(Array.isArray(d))setImp(d.map(nrmTask));else alert("Invalid file.");}catch(err){alert("Error: "+err.message);}};
               r.readAsText(f); e.target.value="";
             }} />
-          </label>
-          <button
+          </label>}
+          {!isMobile && <button
             onClick={async () => {
               const stored = localStorage.getItem("ash-todo-v6");
               if (!stored) { alert("No localStorage tasks found on this device."); return; }
@@ -1324,7 +1413,7 @@ export default function App({ session, signOut }) {
             }}
             style={S.btn}
             title="One-time: bring over tasks from this device's localStorage"
-          >⇪ Import Local</button>
+          >⇪ Import Local</button>}
           <button onClick={signOut} style={{...S.btn, color:"#C0392B"}}>Sign Out</button>
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -1335,18 +1424,20 @@ export default function App({ session, signOut }) {
               </button>
             ))}
           </div>
-          <div style={{flex:1,minWidth:180,position:"relative",display:"flex",alignItems:"center"}}>
+          <div style={{flex:1,minWidth:180,position:"relative",display:"flex",alignItems:"center",...(isMobile?{flexBasis:"100%",marginTop:8}:{})}}>
             <input
               value={filter}
               onChange={e=>setFilter(e.target.value)}
               placeholder="Search…"
-              style={{width:"100%",border:"none",borderBottom:"1px solid #EEE",background:"transparent",fontSize:12,padding:"2px 18px 2px 0",outline:"none",fontFamily:"sans-serif",color:"#666",boxSizing:"border-box"}}
+              style={isMobile
+                ? {width:"100%",border:"1px solid #DDD",borderRadius:8,background:"#FFF",fontSize:16,padding:"10px 32px 10px 12px",outline:"none",fontFamily:"sans-serif",color:"#444",boxSizing:"border-box"}
+                : {width:"100%",border:"none",borderBottom:"1px solid #EEE",background:"transparent",fontSize:12,padding:"2px 18px 2px 0",outline:"none",fontFamily:"sans-serif",color:"#666",boxSizing:"border-box"}}
             />
             {filter && (
               <button
                 onClick={()=>setFilter("")}
                 title="Clear search"
-                style={{position:"absolute",right:0,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"#999",fontSize:14,lineHeight:1,padding:"0 4px",fontFamily:"Georgia,serif"}}
+                style={{position:"absolute",right:isMobile?6:0,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"#999",fontSize:isMobile?18:14,lineHeight:1,padding:"0 4px",fontFamily:"Georgia,serif"}}
               >✕</button>
             )}
           </div>
@@ -1356,7 +1447,7 @@ export default function App({ session, signOut }) {
       <div style={{paddingBottom:"3rem"}}>
         {todayView&&(
           <div>
-            <div style={{padding:"10px 16px",fontSize:13,color:"#888",fontStyle:"italic"}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</div>
+            <div style={{padding:"10px 16px",fontSize:isMobile?14:13,color:"#888",fontStyle:"italic"}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</div>
             {smartTasks.length===0&&<div style={{padding:"2rem 16px",color:"#BBB",fontStyle:"italic"}}>Nothing due today. Enjoy the day, Ash. 🌺</div>}
             {smartTasks.map(t=><TaskRow key={t.id} {...rowProps(t,{id:"today"})} />)}
           </div>
@@ -1367,10 +1458,10 @@ export default function App({ session, signOut }) {
           if (sec.id==="done"&&!items.length) return null;
           return (
             <div key={sec.id}>
-              <div style={{color:sec.color,fontWeight:"bold",fontSize:14,padding:"10px 16px 4px",borderBottom:`2px solid ${sec.color}30`,display:"flex",alignItems:"center",gap:8}}>
+              <div style={{color:sec.color,fontWeight:"bold",fontSize:isMobile?15:14,padding:"10px 16px 4px",borderBottom:`2px solid ${sec.color}30`,display:"flex",alignItems:"center",gap:8}}>
                 <span>{sec.label}</span>
-                <span style={{fontSize:12,color:"#BBB",fontWeight:"normal"}}>{items.length}</span>
-                {sec.id!=="done"&&sec.id!=="parking"&&<button onClick={()=>addToSec(sec.id)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:sec.color,fontSize:18,lineHeight:1}}>＋</button>}
+                <span style={{fontSize:isMobile?13:12,color:"#BBB",fontWeight:"normal"}}>{items.length}</span>
+                {sec.id!=="done"&&sec.id!=="parking"&&<button onClick={()=>addToSec(sec.id)} style={{marginLeft:"auto",background:"none",border:"none",cursor:"pointer",color:sec.color,fontSize:isMobile?20:18,lineHeight:1}}>＋</button>}
               </div>
               {sec.id==="parking"&&(
                 <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 16px",borderBottom:"1px solid #F0F0F0"}}>
@@ -1380,11 +1471,11 @@ export default function App({ session, signOut }) {
                     onChange={e=>setQuick(e.target.value)}
                     onKeyDown={addQ}
                     placeholder="+ add to Parking Lot — Enter to save"
-                    style={{flex:1,border:"none",background:"transparent",fontSize:14,padding:"3px 0",outline:"none",fontFamily:"Georgia,serif",color:"#2C2C2C"}}
+                    style={{flex:1,border:"none",background:"transparent",fontSize:isMobile?16:14,padding:"3px 0",outline:"none",fontFamily:"Georgia,serif",color:"#2C2C2C"}}
                   />
                 </div>
               )}
-              {!items.length&&sec.id!=="parking"&&<div style={{padding:"6px 16px",fontSize:12,color:"#CCC",fontStyle:"italic"}}>Empty</div>}
+              {!items.length&&sec.id!=="parking"&&<div style={{padding:"6px 16px",fontSize:isMobile?13:12,color:"#CCC",fontStyle:"italic"}}>Empty</div>}
               {items.map(t=><TaskRow key={t.id} {...rowProps(t,sec)} />)}
             </div>
           );
