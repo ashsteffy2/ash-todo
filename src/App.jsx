@@ -948,10 +948,24 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                   onSave={v=>onSave({...task, text:v})}
                   placeholder="(untitled)"
                   taskDone={task.done}
-                  style={{fontSize:isMobile?15:14, lineHeight:1.4, wordBreak:"break-word"}}
+                  style={{fontSize:isMobile?15:14, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                 />
               </span>
             );
+            // Blocker — placed immediately after the task name (item 4). Shows
+            // when a blocker exists, or on desktop hover to offer the "+ blocker"
+            // affordance.
+            const blockerEl = (task.blocker || hovered) ? (
+              <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
+                <span style={{color:"#C0392B"}}>→</span>
+                <InlineText
+                  value={task.blocker}
+                  onSave={v=>onSave({...task, blocker:v})}
+                  placeholder="+ blocker"
+                  style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
+                />
+              </span>
+            ) : null;
             const metaItems = (
               <>
                 <InlineArea task={task} onSave={onSave} areas={areas} isMobile={isMobile} />
@@ -962,31 +976,17 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                 >⎘</button>
                 <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} isMobile={isMobile} />
                 <InlineStakeholders task={task} onSave={onSave} isMobile={isMobile} />
-                {/* Blocker inline — wraps only if needed */}
-                {(task.blocker || hovered) && (
-                  <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
-                    <span style={{color:"#C0392B"}}>→</span>
-                    <InlineText
-                      value={task.blocker}
-                      onSave={v=>onSave({...task, blocker:v})}
-                      placeholder="+ blocker"
-                      style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
-                    />
-                  </span>
-                )}
                 {/* Notes toggle inline */}
                 <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
                   {task.notes&&task.notes.trim() ? (showNotes?"📝 hide":"📋 notes") : (showNotes?"📝 hide":"+ notes")}
                 </button>
               </>
             );
-            // Mobile: literal "title begins beside the date" behavior. The
-            // leading cluster (priority + date + recur) is FLOATED left, and the
-            // title is plain inline text in the same block, so its first words sit
-            // to the right of the date and subsequent lines wrap underneath it
-            // (magazine-column style). Float is the only layout mode that wraps
-            // following text around an element — flexbox can't do this. The
-            // metadata row clears the float so it always sits below.
+            // Mobile: the leading cluster (priority + date + recur) is FLOATED
+            // left so the bold title begins beside the date and wraps underneath
+            // it. The blocker (item 4) and the rest of the metadata now flow
+            // inline right after the title (item 2) instead of being forced onto
+            // a separate cleared row — they wrap naturally around the float.
             if (isMobile) {
               const floatedCluster = (
                 <span style={{float:"left",display:"flex",alignItems:"baseline",gap:6,marginRight:6,marginLeft:6}}>
@@ -995,28 +995,47 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                   {rl && <span style={{fontSize:12,color:"#999",fontStyle:"italic"}}>{rl}</span>}
                 </span>
               );
+              // Each metadata piece is wrapped in an inline-block span with a
+              // small right margin so they flow inline after the title (around
+              // the float) with consistent spacing — inline flow doesn't honor
+              // flex `gap`, so the spacing is applied per item here.
+              const sp = { display:"inline-block", marginRight:8, verticalAlign:"baseline" };
               return (
-                <>
-                  <div style={{lineHeight:1.4}}>
-                    {floatedCluster}
+                <div style={{lineHeight:1.7}}>
+                  {floatedCluster}
+                  <span style={{marginRight:8}}>
                     <InlineText
                       value={task.text}
                       onSave={v=>onSave({...task, text:v})}
                       placeholder="(untitled)"
                       taskDone={task.done}
-                      style={{fontSize:15, lineHeight:1.4, wordBreak:"break-word"}}
+                      style={{fontSize:15, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                     />
-                  </div>
-                  <div style={{clear:"both",display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px",marginTop:3}}>
-                    {metaItems}
-                  </div>
-                </>
+                  </span>
+                  {blockerEl && <span style={sp}>{blockerEl}</span>}
+                  <span style={sp}><InlineArea task={task} onSave={onSave} areas={areas} isMobile={isMobile} /></span>
+                  <span style={sp}>
+                    <button
+                      onClick={e=>{e.stopPropagation();onDuplicate(task);}}
+                      title="Duplicate task"
+                      style={{background:"none",border:"none",cursor:"pointer",fontSize:13,padding:0,color:"#CCC",lineHeight:1}}
+                    >⎘</button>
+                  </span>
+                  <span style={sp}><InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} isMobile={isMobile} /></span>
+                  <span style={sp}><InlineStakeholders task={task} onSave={onSave} isMobile={isMobile} /></span>
+                  <span style={sp}>
+                    <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
+                      {task.notes&&task.notes.trim() ? (showNotes?"📝 hide":"📋 notes") : (showNotes?"📝 hide":"+ notes")}
+                    </button>
+                  </span>
+                </div>
               );
             }
             return (
               <div style={{display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px"}}>
                 {leadingCluster}
                 {titleEl}
+                {blockerEl}
                 {metaItems}
               </div>
             );
