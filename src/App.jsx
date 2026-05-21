@@ -49,6 +49,26 @@ const todayStr = () => {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 };
 
+// Apple-Notes-style system sans (San Francisco on Apple devices) for task names
+// and the blocker. Compact monospace for the date so it reads as tabular and
+// stays visually distinct from the title.
+const FONT_TASK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+const FONT_DATE = 'ui-monospace, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace';
+
+// Format a YYYY-MM-DD date as "MON 5/18". Year suffix ("/27") is added only when
+// the date's year differs from the current year, using the last two digits.
+const DOW_ABBR = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+const fmtDueDate = iso => {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const dt = new Date(y, m-1, d);
+  const dow = DOW_ABBR[dt.getDay()];
+  const base = `${dow} ${m}/${d}`;
+  const curYear = new Date().getFullYear();
+  return y === curYear ? base : `${base}/${String(y).slice(-2)}`;
+};
+
 const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const priorityColor = p => p==="High"?"#C0392B":p==="Medium"?"#E67E22":"#27AE60";
 const priorityBg = p => p==="High"?"#FADBD8":p==="Medium"?"#FDEBD0":"#D5F5E3";
@@ -614,10 +634,10 @@ const InlineDate = ({task, onSave, rowHovered, isMobile}) => {
 
   const dfs = isMobile ? 12 : 11;
   const labelStyle = task.dueDate
-    ? {fontSize:dfs,fontWeight:"bold",color:isOverdue?"#C0392B":"#888",background:isOverdue?"#FADBD8":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}
-    : {fontSize:dfs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",userSelect:"none",whiteSpace:"nowrap"};
+    ? {fontFamily:FONT_DATE,fontSize:dfs,fontWeight:"bold",color:isOverdue?"#C0392B":"#888",background:isOverdue?"#FADBD8":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}
+    : {fontFamily:FONT_DATE,fontSize:dfs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",userSelect:"none",whiteSpace:"nowrap"};
 
-  const labelText = task.dueDate ? `${isOverdue?"⚠ ":""}${task.dueDate}` : "No date";
+  const labelText = task.dueDate ? `${isOverdue?"⚠ ":""}${fmtDueDate(task.dueDate)}` : "No date";
 
   return (
     <span ref={popoverRef} style={{position:"relative",display:"inline-flex",alignItems:"center",gap:2}}>
@@ -942,27 +962,27 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
               </span>
             );
             const titleEl = (
-              <span style={{flex:"1 1 0",minWidth:0}}>
+              <span style={{flex:"0 1 auto",minWidth:0}}>
                 <InlineText
                   value={task.text}
                   onSave={v=>onSave({...task, text:v})}
                   placeholder="(untitled)"
                   taskDone={task.done}
-                  style={{fontSize:isMobile?15:14, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
+                  style={{fontFamily:FONT_TASK, fontSize:isMobile?15:14, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                 />
               </span>
             );
-            // Blocker — placed immediately after the task name (item 4). Shows
-            // when a blocker exists, or on desktop hover to offer the "+ blocker"
-            // affordance.
+            // Blocker — placed immediately after the task name (item 4), styled
+            // like the reference: " - " separator + bold red text (no arrow).
+            // Shows when a blocker exists, or on desktop hover for the affordance.
             const blockerEl = (task.blocker || hovered) ? (
-              <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
-                <span style={{color:"#C0392B"}}>→</span>
+              <span style={{fontFamily:FONT_TASK,fontSize:isMobile?13:12,color:"#C0392B",fontWeight:"bold",display:"inline-flex",alignItems:"baseline",gap:4}}>
+                <span style={{color:"#C0392B",fontWeight:"normal"}}>-</span>
                 <InlineText
                   value={task.blocker}
                   onSave={v=>onSave({...task, blocker:v})}
                   placeholder="+ blocker"
-                  style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
+                  style={{fontFamily:FONT_TASK,fontSize:isMobile?13:12, color:"#C0392B", fontWeight:"bold"}}
                 />
               </span>
             ) : null;
@@ -1009,7 +1029,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                       onSave={v=>onSave({...task, text:v})}
                       placeholder="(untitled)"
                       taskDone={task.done}
-                      style={{fontSize:15, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
+                      style={{fontFamily:FONT_TASK, fontSize:15, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                     />
                   </span>
                   {blockerEl && <span style={sp}>{blockerEl}</span>}
