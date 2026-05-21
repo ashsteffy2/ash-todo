@@ -1592,7 +1592,7 @@ export default function App({ session, signOut }) {
             </span>
           </div>
           <button
-            onClick={()=>window.scrollTo({top:0,behavior:"smooth"})}
+            onClick={()=>window.scrollTo(0,0)}
             aria-label="Scroll to top"
             title="Back to top"
             style={{flexShrink:0,width:isMobile?32:28,height:isMobile?32:28,borderRadius:"50%",border:"1px solid #DDD",background:"#FFF",color:"#888",fontSize:isMobile?17:15,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
