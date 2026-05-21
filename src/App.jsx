@@ -914,6 +914,7 @@ export default function App({ session, signOut }) {
   const [filter,setFilter] = useState("");
   const [saved,setSaved] = useState("");
   const [rtStatus,setRtStatus] = useState("connecting…"); // TEMP DEBUG: realtime connection status
+  const [rtEvents,setRtEvents] = useState(0); // TEMP DEBUG: count of realtime events received
   const [showExp,setShowExp] = useState(false);
   const [imp,setImp] = useState(null);
   const [migr,setMigr] = useState(null);
@@ -1067,6 +1068,7 @@ export default function App({ session, signOut }) {
         { event: "*", schema: "public", table: "tasks", filter: `user_id=eq.${userId}` },
         payload => {
           console.log("[realtime] event received:", payload.eventType, payload); // TEMP DEBUG
+          setRtEvents(n => n + 1); // TEMP DEBUG: count every event that arrives
           const { eventType, new: newRow, old: oldRow } = payload;
 
           if (eventType === "DELETE") {
@@ -1240,7 +1242,7 @@ export default function App({ session, signOut }) {
             {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
             {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
             {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
-            <span style={{marginLeft:8,color:rtStatus==="SUBSCRIBED"?"#27AE60":"#C0392B",fontWeight:"bold"}}>RT:{rtStatus}</span>
+            <span style={{marginLeft:8,color:rtStatus==="SUBSCRIBED"?"#27AE60":"#C0392B",fontWeight:"bold"}}>RT:{rtStatus} ⟳{rtEvents}</span>
           </span>
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
