@@ -231,7 +231,7 @@ const DEFAULT_TASKS = [
 ];
 
 const S = {
-  app: {fontFamily:"Georgia,serif",background:"#FFFFFF",minHeight:"100vh",color:"#2C2C2C",maxWidth:"100%"},
+  app: {fontFamily:"Georgia,serif",background:"#FFFFFF",minHeight:"100vh",color:"#2C2C2C",maxWidth:"100%",overflowX:"clip"},
   input: {fontFamily:"Georgia,serif",padding:"5px 8px",border:"1px solid #CCC",borderRadius:4,fontSize:14,background:"#FFF"},
   btn: {fontFamily:"Georgia,serif",cursor:"pointer",padding:"4px 10px",border:"1px solid #CCC",borderRadius:4,fontSize:13,background:"#FFF"},
   tog: on => ({fontFamily:"Georgia,serif",cursor:"pointer",padding:"3px 10px",border:`1px solid ${on?"#2C2C2C":"#CCC"}`,borderRadius:4,fontSize:12,background:on?"#2C2C2C":"#FFF",color:on?"#FFF":"#555"}),
@@ -1217,9 +1217,10 @@ export default function App({ session, signOut }) {
   }, []);
 
   // Item 5: lock the layout to the device width and disable pinch/double-tap
-  // zoom (which was letting users scroll parts of the UI off-screen). We set the
-  // viewport meta from JS so it applies regardless of index.html, and hide
-  // horizontal overflow on the root elements so nothing can sit off to the side.
+  // zoom. We set the viewport meta from JS so it applies regardless of
+  // index.html. Horizontal overflow is contained by overflow-x:clip on S.app
+  // (see below) rather than on <html>/<body>, because root-level overflow
+  // breaks position:sticky.
   useEffect(() => {
     let meta = document.querySelector('meta[name="viewport"]');
     if (!meta) {
@@ -1232,16 +1233,15 @@ export default function App({ session, signOut }) {
       "content",
       "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     );
-    const prevHtmlOverflowX = document.documentElement.style.overflowX;
-    const prevBodyOverflowX = document.body.style.overflowX;
+    // NOTE: we deliberately do NOT set overflow-x:hidden on <html>/<body>.
+    // Doing so makes the document root a scroll container, which breaks
+    // position:sticky on descendants (the header would scroll away). Horizontal
+    // overflow is instead contained via overflow-x:clip on the app container
+    // (S.app), which constrains width without creating a scroll container.
     const prevBodyMargin = document.body.style.margin;
-    document.documentElement.style.overflowX = "hidden";
-    document.body.style.overflowX = "hidden";
     document.body.style.margin = "0";
     return () => {
       if (prevContent) meta.setAttribute("content", prevContent);
-      document.documentElement.style.overflowX = prevHtmlOverflowX;
-      document.body.style.overflowX = prevBodyOverflowX;
       document.body.style.margin = prevBodyMargin;
     };
   }, []);
