@@ -831,6 +831,11 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
   const [hovered,setHovered] = useState(false);
   const [editing,setEditing] = useState(false);
   const [showNotes,setShowNotes] = useState(false);
+  // Mobile-only: the ⋯ button toggles an action strip (Edit/Delete/Move) since
+  // there's no hover on touch. confirmDelete gates the destructive delete behind
+  // an inline confirm step.
+  const [mobileActionsOpen,setMobileActionsOpen] = useState(false);
+  const [confirmDelete,setConfirmDelete] = useState(false);
   const touchStartX = useRef(null);
 
   // Build the recurrence label shown in list view.
@@ -874,6 +879,52 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
     }
   };
 
+  // Close the mobile action strip and reset any pending delete confirm.
+  const closeMobileActions = () => { setMobileActionsOpen(false); setConfirmDelete(false); };
+
+  // Mobile: tapping empty space in the row toggles the action strip. Most
+  // interactive children (title, chips) call stopPropagation, so their taps
+  // never reach here. We still guard against taps on real controls and on the
+  // strip itself (which don't stop propagation) by walking up from the target.
+  const handleRowTap = e => {
+    if (!isMobile) return;
+    const t = e.target;
+    if (t.closest && t.closest('[data-no-row-tap]')) return; // strip / explicit opt-out
+    const tag = t.tagName;
+    if (tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "A") return;
+    if (t.closest && t.closest("button, input, textarea, select, a")) return;
+    setMobileActionsOpen(o=>!o);
+    setConfirmDelete(false);
+  };
+
+  // Edit / Delete / Move actions, shared by the desktop hover block and the
+  // mobile ⋯ strip. `big` sizes them up for touch. On mobile, Delete is two-step
+  // (first tap arms confirmation, second tap deletes); on desktop it deletes
+  // immediately, preserving prior behavior.
+  const renderActions = ({ big=false, confirm=false, onAfter=()=>{} } = {}) => {
+    const fs = big ? 13 : 11;
+    const pad = big ? "6px 12px" : "2px 8px";
+    return (
+      <>
+        {isParking && task.pinnedToParking && <button onClick={()=>{onMoveToTasks(task);onAfter();}} style={{...S.btn,fontSize:fs,color:"#FFF",background:"#2C2C2C",borderColor:"#2C2C2C",padding:pad}}>Move to Tasks</button>}
+        {isParking && !task.pinnedToParking && <button onClick={()=>{onMoveToToday(task);onAfter();}} style={{...S.btn,fontSize:fs,color:"#C0392B",borderColor:"#C0392B",padding:pad}}>→Today</button>}
+        <button onClick={()=>{setEditing(true);onAfter();}} title="Open full editor" style={{...S.btn,fontSize:fs,padding:pad}}>{big?"✎ Edit":"✎"}</button>
+        {confirm ? (
+          confirmDelete ? (
+            <span style={{display:"inline-flex",gap:4,alignItems:"center"}}>
+              <button onClick={()=>{onDelete(task.id);setConfirmDelete(false);onAfter();}} style={{...S.btn,fontSize:fs,color:"#FFF",background:"#C0392B",borderColor:"#C0392B",padding:pad,fontWeight:"bold"}}>Delete?</button>
+              <button onClick={()=>setConfirmDelete(false)} style={{...S.btn,fontSize:fs,padding:pad}}>Cancel</button>
+            </span>
+          ) : (
+            <button onClick={()=>setConfirmDelete(true)} title="Delete task" style={{...S.btn,fontSize:fs,color:"#C0392B",padding:pad}}>🗑 Delete</button>
+          )
+        ) : (
+          <button onClick={()=>{onDelete(task.id);onAfter();}} title="Delete task" style={{...S.btn,fontSize:fs,color:"#C0392B",padding:pad}}>✕</button>
+        )}
+      </>
+    );
+  };
+
   return (
     <>
       <div style={{display:"flex",alignItems:"flex-start",padding:"6px 16px",borderBottom:"1px solid #F0F0F0",gap:8,background:hovered?"#F5F5F0":"transparent",opacity:task.done?0.6:1}}
@@ -881,53 +932,95 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
         onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}
       >
         <button onClick={()=>onToggleDone(task)} style={{width:16,height:16,borderRadius:"50%",border:`1.5px solid ${task.done?"#BBB":"#888"}`,background:task.done?"#BBB":"transparent",cursor:"pointer",flexShrink:0,marginTop:4,padding:0}} />
-        <div style={{flex:1,minWidth:0}} onClickCapture={handleEditAreaClick}>
-          <div style={{display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px"}}>
-            {/* Leading cluster: priority dot + date + recur label stay together on
-                one line and never wrap apart, so the title always starts beside
-                the date (item 8). On mobile the priority dot gets extra left space
-                to clear the complete button (item 7). */}
-            <span style={{display:"inline-flex",alignItems:"baseline",gap:6,flexShrink:0,...(isMobile?{marginLeft:6}:{})}}>
-              <InlinePriority task={task} onSave={onSave} />
-              <InlineDate task={task} onSave={onSave} rowHovered={hovered} isMobile={isMobile} />
-              {rl && <span style={{fontSize:isMobile?12:11,color:"#999",fontStyle:"italic"}}>{rl}</span>}
-            </span>
-            {/* Title: grows to fill the rest of the first line and wraps its own
-                text inline instead of being pushed below the date as a block. */}
-            <span style={{flex:"1 1 auto",minWidth:0}}>
-              <InlineText
-                value={task.text}
-                onSave={v=>onSave({...task, text:v})}
-                placeholder="(untitled)"
-                taskDone={task.done}
-                style={{fontSize:isMobile?15:14, lineHeight:1.4, wordBreak:"break-word"}}
-              />
-            </span>
-            <InlineArea task={task} onSave={onSave} areas={areas} isMobile={isMobile} />
-            <button
-              onClick={e=>{e.stopPropagation();onDuplicate(task);}}
-              title="Duplicate task"
-              style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:"0 2px",color:hovered?"#888":"#CCC",lineHeight:1}}
-            >⎘</button>
-            <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} isMobile={isMobile} />
-            <InlineStakeholders task={task} onSave={onSave} isMobile={isMobile} />
-            {/* Blocker inline — wraps only if needed */}
-            {(task.blocker || hovered) && (
-              <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
-                <span style={{color:"#C0392B"}}>→</span>
+        <div style={{flex:1,minWidth:0}} onClickCapture={handleEditAreaClick} onClick={handleRowTap}>
+          {(() => {
+            const leadingCluster = (
+              <span style={{display:"inline-flex",alignItems:"baseline",gap:6,flexShrink:0,...(isMobile?{marginLeft:6}:{})}}>
+                <InlinePriority task={task} onSave={onSave} />
+                <InlineDate task={task} onSave={onSave} rowHovered={hovered} isMobile={isMobile} />
+                {rl && <span style={{fontSize:isMobile?12:11,color:"#999",fontStyle:"italic"}}>{rl}</span>}
+              </span>
+            );
+            const titleEl = (
+              <span style={{flex:"1 1 0",minWidth:0}}>
                 <InlineText
-                  value={task.blocker}
-                  onSave={v=>onSave({...task, blocker:v})}
-                  placeholder="+ blocker"
-                  style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
+                  value={task.text}
+                  onSave={v=>onSave({...task, text:v})}
+                  placeholder="(untitled)"
+                  taskDone={task.done}
+                  style={{fontSize:isMobile?15:14, lineHeight:1.4, wordBreak:"break-word"}}
                 />
               </span>
-            )}
-            {/* Notes toggle inline */}
-            <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
-              {task.notes&&task.notes.trim() ? (showNotes?"📝 hide":"📋 notes") : (showNotes?"📝 hide":"+ notes")}
-            </button>
-          </div>
+            );
+            const metaItems = (
+              <>
+                <InlineArea task={task} onSave={onSave} areas={areas} isMobile={isMobile} />
+                <button
+                  onClick={e=>{e.stopPropagation();onDuplicate(task);}}
+                  title="Duplicate task"
+                  style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:"0 2px",color:hovered?"#888":"#CCC",lineHeight:1}}
+                >⎘</button>
+                <InlineProject task={task} onSave={onSave} projects={projects} onProjectsChange={onProjectsChange} isMobile={isMobile} />
+                <InlineStakeholders task={task} onSave={onSave} isMobile={isMobile} />
+                {/* Blocker inline — wraps only if needed */}
+                {(task.blocker || hovered) && (
+                  <span style={{fontSize:isMobile?13:12,color:"#C0392B",fontStyle:"italic",display:"inline-flex",alignItems:"baseline",gap:3}}>
+                    <span style={{color:"#C0392B"}}>→</span>
+                    <InlineText
+                      value={task.blocker}
+                      onSave={v=>onSave({...task, blocker:v})}
+                      placeholder="+ blocker"
+                      style={{fontSize:isMobile?13:12, color:"#C0392B", fontStyle:"italic"}}
+                    />
+                  </span>
+                )}
+                {/* Notes toggle inline */}
+                <button onClick={e=>{e.stopPropagation();setShowNotes(n=>!n);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:isMobile?13:12,padding:0,color:task.notes&&task.notes.trim()?(showNotes?"#8B6914":"#C8A84B"):"#CCC",lineHeight:1.4}}>
+                  {task.notes&&task.notes.trim() ? (showNotes?"📝 hide":"📋 notes") : (showNotes?"📝 hide":"+ notes")}
+                </button>
+              </>
+            );
+            // Mobile: literal "title begins beside the date" behavior. The
+            // leading cluster (priority + date + recur) is FLOATED left, and the
+            // title is plain inline text in the same block, so its first words sit
+            // to the right of the date and subsequent lines wrap underneath it
+            // (magazine-column style). Float is the only layout mode that wraps
+            // following text around an element — flexbox can't do this. The
+            // metadata row clears the float so it always sits below.
+            if (isMobile) {
+              const floatedCluster = (
+                <span style={{float:"left",display:"flex",alignItems:"baseline",gap:6,marginRight:6,marginLeft:6}}>
+                  <InlinePriority task={task} onSave={onSave} />
+                  <InlineDate task={task} onSave={onSave} rowHovered={hovered} isMobile={isMobile} />
+                  {rl && <span style={{fontSize:12,color:"#999",fontStyle:"italic"}}>{rl}</span>}
+                </span>
+              );
+              return (
+                <>
+                  <div style={{lineHeight:1.4}}>
+                    {floatedCluster}
+                    <InlineText
+                      value={task.text}
+                      onSave={v=>onSave({...task, text:v})}
+                      placeholder="(untitled)"
+                      taskDone={task.done}
+                      style={{fontSize:15, lineHeight:1.4, wordBreak:"break-word"}}
+                    />
+                  </div>
+                  <div style={{clear:"both",display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px",marginTop:3}}>
+                    {metaItems}
+                  </div>
+                </>
+              );
+            }
+            return (
+              <div style={{display:"flex",flexWrap:"wrap",alignItems:"baseline",gap:"4px 6px"}}>
+                {leadingCluster}
+                {titleEl}
+                {metaItems}
+              </div>
+            );
+          })()}
           {showNotes && (
             <div style={{marginTop:4, padding:"6px 10px", background:"#FFFBF0", borderLeft:"2px solid #C8A84B", borderRadius:"0 3px 3px 0"}}>
               <InlineText
@@ -939,18 +1032,95 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
               />
             </div>
           )}
+          {/* Mobile: action strip revealed by the ⋯ button. Sits below the row
+              content; the title above reflows naturally to make room. */}
+          {isMobile && mobileActionsOpen && (
+            <div data-no-row-tap style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8,paddingTop:8,borderTop:"1px dashed #EEE"}}>
+              {renderActions({ big:true, confirm:true, onAfter:closeMobileActions })}
+            </div>
+          )}
         </div>
-        {hovered&&(
+        {/* Desktop: hover-revealed icon actions. */}
+        {!isMobile && hovered && (
           <div style={{display:"flex",gap:4,flexShrink:0}}>
-            {isParking && task.pinnedToParking && <button onClick={()=>onMoveToTasks(task)} style={{...S.btn,fontSize:11,color:"#FFF",background:"#2C2C2C",borderColor:"#2C2C2C",padding:"2px 8px"}}>Move to Tasks</button>}
-            {isParking && !task.pinnedToParking && <button onClick={()=>onMoveToToday(task)} style={{...S.btn,fontSize:11,color:"#C0392B",borderColor:"#C0392B",padding:"2px 8px"}}>→Today</button>}
-            <button onClick={()=>setEditing(true)} title="Open full editor" style={{...S.btn,fontSize:11,padding:"2px 8px"}}>✎</button>
-            <button onClick={()=>onDelete(task.id)} style={{...S.btn,fontSize:11,color:"#C0392B",padding:"2px 8px"}}>✕</button>
+            {renderActions()}
           </div>
+        )}
+        {/* Mobile: always-visible ⋯ toggle for the action strip. */}
+        {isMobile && (
+          <button
+            onClick={()=>{ setMobileActionsOpen(o=>!o); setConfirmDelete(false); }}
+            aria-label="Task actions"
+            title="Task actions"
+            style={{flexShrink:0,marginTop:2,width:32,height:32,borderRadius:"50%",border:"none",background:mobileActionsOpen?"#EEE":"transparent",color:"#888",fontSize:20,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}
+          >⋯</button>
         )}
       </div>
       {editing&&<EditModal task={task} tasks={tasks} areas={areas} projects={projects} onAreasChange={()=>{}} onProjectsChange={onProjectsChange} isParking={isParking} onMoveToTasks={onMoveToTasks} onSave={t=>{onSave(t);setEditing(false);}} onClose={()=>setEditing(false)} />}
     </>
+  );
+};
+
+// Avatar + account popover shown top-right of the header. Displays the first
+// initial of the signed-in email; clicking opens a small menu with the full
+// email and a Sign Out action. If signed out, shows a neutral state and a
+// Sign In affordance.
+const AccountMenu = ({ session, signOut, isMobile }) => {
+  const [open, setOpen] = useState(false);
+  const ref = usePopover(open, () => setOpen(false));
+  const email = session?.user?.email || "";
+  const signedIn = !!email;
+  const initial = signedIn ? email.trim().charAt(0).toUpperCase() : "?";
+  const size = isMobile ? 34 : 30;
+
+  return (
+    <span ref={ref} style={{position:"relative",display:"inline-flex",flexShrink:0}}>
+      <button
+        onClick={e=>{e.stopPropagation();setOpen(o=>!o);}}
+        title={signedIn ? email : "Signed out"}
+        aria-label={signedIn ? `Account: ${email}` : "Signed out"}
+        style={{
+          width:size,height:size,borderRadius:"50%",cursor:"pointer",
+          border: signedIn ? "none" : "1.5px dashed #BBB",
+          background: signedIn ? "#2C2C2C" : "#F0F0F0",
+          color: signedIn ? "#FFF" : "#999",
+          fontFamily:"Georgia,serif",fontWeight:"bold",fontSize:isMobile?16:14,
+          display:"flex",alignItems:"center",justifyContent:"center",padding:0,lineHeight:1
+        }}
+      >{initial}</button>
+      {open && (
+        <span
+          onClick={e=>e.stopPropagation()}
+          style={{
+            position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:120,
+            background:"#FFF",border:"1px solid #DDD",borderRadius:8,
+            boxShadow:"0 6px 20px rgba(0,0,0,.14)",padding:12,minWidth:220,maxWidth:"calc(100vw - 24px)",
+            display:"flex",flexDirection:"column",gap:10,fontFamily:"Georgia,serif"
+          }}
+        >
+          {signedIn ? (
+            <>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{width:32,height:32,borderRadius:"50%",background:"#2C2C2C",color:"#FFF",fontWeight:"bold",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{initial}</span>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:11,color:"#999"}}>Signed in as</div>
+                  <div style={{fontSize:13,color:"#2C2C2C",wordBreak:"break-all"}}>{email}</div>
+                </div>
+              </div>
+              <button onClick={()=>{setOpen(false);signOut();}} style={{...S.btn,color:"#C0392B",borderColor:"#E0B4B0",width:"100%",textAlign:"center"}}>Sign Out</button>
+            </>
+          ) : (
+            <>
+              <div style={{display:"flex",alignItems:"center",gap:8,color:"#999",fontSize:13}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:"#CCC",display:"inline-block"}} />
+                You're signed out
+              </div>
+              <button onClick={()=>{setOpen(false);signOut&&signOut();}} style={{...S.btn,width:"100%",textAlign:"center"}}>Sign In</button>
+            </>
+          )}
+        </span>
+      )}
+    </span>
   );
 };
 
@@ -1369,24 +1539,21 @@ export default function App({ session, signOut }) {
   return (
     <div style={S.app}>
       <div style={{position:"sticky",top:0,zIndex:100,background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
-          <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
-          <span style={{fontSize:isMobile?13:12,color:"#999",fontFamily:"monospace"}}>
-            {nAct} active · {nDone} done · {session?.user?.email}
-            {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
-            {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
-            {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
-          </span>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",flex:1,minWidth:0}}>
+            <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash's To-Do</span>
+            <span style={{fontSize:isMobile?13:12,color:"#999",fontFamily:"monospace"}}>
+              {nAct} active · {nDone} done
+              {nOvd>0&&<span style={{marginLeft:8,color:"#C0392B",fontWeight:"bold"}}>⚠ {nOvd} overdue</span>}
+              {nStale>0&&<span style={{marginLeft:8,color:"#E67E22",fontWeight:"bold"}}>⚠ {nStale} stale</span>}
+              {saved&&<span style={{marginLeft:8,color:"#27AE60"}}>{saved}</span>}
+            </span>
+          </div>
+          <AccountMenu session={session} signOut={signOut} isMobile={isMobile} />
         </div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
-          <button
-            onClick={undo}
-            disabled={historyCount===0}
-            title={historyCount===0 ? "Nothing to undo" : `Undo (${historyCount} step${historyCount===1?"":"s"} available)`}
-            style={{...S.btn, opacity: historyCount===0 ? 0.4 : 1, cursor: historyCount===0 ? "not-allowed" : "pointer"}}
-          >↶ Undo{historyCount>0?` (${historyCount})`:""}</button>
-          {!isMobile && <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>}
-          {!isMobile && <label style={S.btn}>
+        {!isMobile && <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
+          <button onClick={()=>setShowExp(true)} style={S.btn}>↓ Export JSON</button>
+          <label style={S.btn}>
             ↑ Import JSON
             <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
               const f=e.target.files[0]; if(!f)return;
@@ -1394,8 +1561,8 @@ export default function App({ session, signOut }) {
               r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(Array.isArray(d))setImp(d.map(nrmTask));else alert("Invalid file.");}catch(err){alert("Error: "+err.message);}};
               r.readAsText(f); e.target.value="";
             }} />
-          </label>}
-          {!isMobile && <button
+          </label>
+          <button
             onClick={async () => {
               const stored = localStorage.getItem("ash-todo-v6");
               if (!stored) { alert("No localStorage tasks found on this device."); return; }
@@ -1413,16 +1580,35 @@ export default function App({ session, signOut }) {
             }}
             style={S.btn}
             title="One-time: bring over tasks from this device's localStorage"
-          >⇪ Import Local</button>}
-          <button onClick={signOut} style={{...S.btn, color:"#C0392B"}}>Sign Out</button>
-        </div>
+          >⇪ Import Local</button>
+        </div>}
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",flexShrink:0}}>
+          <div style={{display:"flex",gap:6,alignItems:"center",...(isMobile?{flex:"1 1 100%"}:{flex:"0 1 auto"})}}>
             {["both","work","personal","today"].map(v=>(
-              <button key={v} onClick={()=>setView(v)} style={{...S.tog(view===v),textTransform:v==="today"?"none":"capitalize"}}>
+              <button key={v} onClick={()=>setView(v)} style={{...S.tog(view===v),padding:isMobile?"7px 16px":"6px 14px",fontSize:isMobile?14:13,textTransform:v==="today"?"none":"capitalize"}}>
                 {v==="today"?"Today ✦":v==="both"?"All":v.charAt(0).toUpperCase()+v.slice(1)}
               </button>
             ))}
+            <button
+              onClick={undo}
+              disabled={historyCount===0}
+              title={historyCount===0 ? "Nothing to undo" : `Undo (${historyCount} step${historyCount===1?"":"s"} available)`}
+              aria-label="Undo"
+              style={{
+                marginLeft:"auto",flexShrink:0,position:"relative",
+                width:isMobile?40:34,height:isMobile?40:34,borderRadius:"50%",
+                border:"1px solid #DDD",background:"#FFF",
+                cursor:historyCount===0?"not-allowed":"pointer",
+                opacity:historyCount===0?0.4:1,
+                fontSize:isMobile?20:17,color:"#2C2C2C",lineHeight:1,
+                display:"flex",alignItems:"center",justifyContent:"center",padding:0
+              }}
+            >
+              ↶
+              {historyCount>0 && (
+                <span style={{position:"absolute",top:-2,right:-2,minWidth:16,height:16,padding:"0 4px",borderRadius:8,background:"#C0392B",color:"#FFF",fontSize:10,fontWeight:"bold",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"sans-serif",lineHeight:1}}>{historyCount}</span>
+              )}
+            </button>
           </div>
           <div style={{flex:1,minWidth:180,position:"relative",display:"flex",alignItems:"center",...(isMobile?{flexBasis:"100%",marginTop:8}:{})}}>
             <input
