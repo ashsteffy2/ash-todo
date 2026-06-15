@@ -357,6 +357,15 @@ const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onPro
   const [newProj,setNewProj] = useState("");
   const [otherSH,setOtherSH] = useState("");
 
+  // Auto-grow textarea for task title — recomputes height whenever t.text changes
+  const titleRef = useRef(null);
+  useEffect(() => {
+    const el = titleRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }, [t.text]);
+
   const addProj = () => {
     if (!newProj.trim()) return;
     const updated = [...projects,newProj.trim()];
@@ -398,7 +407,15 @@ const EditModal = ({task,tasks,onSave,onClose,areas,projects,onAreasChange,onPro
           </div>
           <div style={{padding:"16px 24px 24px"}}>
           <div style={S.row}>
-            <input value={t.text} onChange={e=>setT(p=>({...p,text:e.target.value}))} style={{...S.input,width:"100%",fontSize:16,boxSizing:"border-box"}} autoFocus placeholder="Task title…" />
+            <textarea
+              ref={titleRef}
+              value={t.text}
+              onChange={e=>setT(p=>({...p,text:e.target.value}))}
+              rows={1}
+              style={{...S.input,width:"100%",fontSize:16,boxSizing:"border-box",resize:"none",overflow:"hidden",lineHeight:1.4,minHeight:"2.4em",fontFamily:"Georgia,serif"}}
+              autoFocus
+              placeholder="Task title…"
+            />
           </div>
           <div style={S.row}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
@@ -623,9 +640,19 @@ const InlineDate = ({task, onSave, rowHovered, isMobile}) => {
   const popoverRef = usePopover(open, () => setOpen(false));
   const today = todayStr();
   const isOverdue = task.dueDate && task.dueDate<today && !task.done;
-  const rl = task.recurType && task.recurType!=="None";
+  const isRecurring = task.recurType && task.recurType!=="None";
 
-  if (rl) return null;
+  // For recurring tasks without an explicit dueDate:
+  // - If recurring today, show today's date
+  // - Otherwise show the next computed occurrence
+  // Either way, clicking opens the calendar so the user can override with a one-off date.
+  const recurringDisplayDate = (() => {
+    if (!isRecurring || task.dueDate) return null;
+    if (isRecurringToday(task)) return today;
+    return nextRecurDate(task);
+  })();
+
+  const displayDate = task.dueDate || recurringDisplayDate;
 
   const clearDate = e => {
     e.stopPropagation();
@@ -633,11 +660,11 @@ const InlineDate = ({task, onSave, rowHovered, isMobile}) => {
   };
 
   const dfs = isMobile ? 12 : 11;
-  const labelStyle = task.dueDate
+  const labelStyle = displayDate
     ? {fontFamily:FONT_DATE,fontSize:dfs,fontWeight:"bold",color:isOverdue?"#C0392B":"#888",background:isOverdue?"#FADBD8":"transparent",padding:"1px 5px",borderRadius:3,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}
     : {fontFamily:FONT_DATE,fontSize:dfs,color:"#CCC",cursor:"pointer",borderBottom:"1px dashed #DDD",userSelect:"none",whiteSpace:"nowrap"};
 
-  const labelText = task.dueDate ? `${isOverdue?"⚠ ":""}${fmtDueDate(task.dueDate)}` : "No date";
+  const labelText = displayDate ? `${isOverdue?"⚠ ":""}${fmtDueDate(displayDate)}` : "No date";
 
   return (
     <span ref={popoverRef} style={{position:"relative",display:"inline-flex",alignItems:"center",gap:2}}>
@@ -822,12 +849,43 @@ const InlineStakeholders = ({task, onSave, isMobile}) => {
   );
 };
 
-const InlineText = ({value, onSave, placeholder, style, multiline=false, taskDone=false}) => {
+const InlineText = ({value, onSave, placeholder, style, multiline=false, autoGrow=false, taskDone=false}) => {
   const [editing, setEditing] = useState(false);
   const [v, setV] = useState(value||"");
+  const taRef = useRef(null);
   useEffect(()=>{ setV(value||""); }, [value]);
+
+  // Auto-grow: recalc the textarea height on every value change while editing
+  useEffect(() => {
+    if (!editing || !autoGrow) return;
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }, [v, editing, autoGrow]);
+
   const commit = () => { setEditing(false); if ((v||"")!==(value||"")) onSave(v); };
   if (editing) {
+    // Auto-grow textarea: starts at 1 line and grows vertically as text wraps.
+    // The textarea takes 100% of its parent's width so it fits whatever space
+    // its row caller provides. Enter commits (no newline allowed), Escape cancels.
+    if (autoGrow) {
+      return (
+        <textarea
+          ref={taRef}
+          autoFocus
+          value={v}
+          onChange={e=>setV(e.target.value.replace(/\n/g, ""))}
+          onBlur={commit}
+          onKeyDown={e=>{
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (e.key === "Escape") { setV(value||""); setEditing(false); }
+          }}
+          rows={1}
+          style={{...style, fontFamily:"Georgia,serif", border:"1px solid #DDD", borderRadius:4, padding:"2px 6px", outline:"none", background:"#FFF", width:"100%", minWidth:200, boxSizing:"border-box", resize:"none", overflow:"hidden", lineHeight:1.4, display:"block"}}
+        />
+      );
+    }
     return multiline ? (
       <textarea autoFocus value={v} onChange={e=>setV(e.target.value)} onBlur={commit}
         onKeyDown={e=>{if(e.key==="Escape"){setV(value||"");setEditing(false);}if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))commit();}}
@@ -968,6 +1026,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                   onSave={v=>onSave({...task, text:v})}
                   placeholder="(untitled)"
                   taskDone={task.done}
+                  autoGrow
                   style={{fontFamily:FONT_TASK, fontSize:isMobile?15:14, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                 />
               </span>
@@ -1029,6 +1088,7 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
                       onSave={v=>onSave({...task, text:v})}
                       placeholder="(untitled)"
                       taskDone={task.done}
+                      autoGrow
                       style={{fontFamily:FONT_TASK, fontSize:15, fontWeight:"bold", lineHeight:1.4, wordBreak:"break-word"}}
                     />
                   </span>
@@ -1229,9 +1289,19 @@ export default function App({ session, signOut }) {
     setTasks(prev);
   };
 
-  // Cmd/Ctrl+Z keyboard shortcut for undo
+  // Cmd/Ctrl+Z keyboard shortcut for undo; Cmd/Ctrl+F focuses search
+  const searchInputRef = useRef(null);
   useEffect(() => {
     const handler = e => {
+      // Cmd/Ctrl + F → focus the in-app search field (overrides browser find)
+      if ((e.metaKey || e.ctrlKey) && e.key === "f" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+          searchInputRef.current.select();
+        }
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) {
         // Don't hijack if the user is typing inside an input/textarea/contenteditable
         const t = e.target;
@@ -1244,6 +1314,14 @@ export default function App({ session, signOut }) {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // Home reset: clears filter+search, resets view to "both", scrolls to top.
+  // Wired to the "Ash To Do" title click and used elsewhere.
+  const resetToHome = () => {
+    setFilter("");
+    setView("both");
+    scrollToTop();
+  };
 
   // Item 5: lock the layout to the device width and disable pinch/double-tap
   // zoom. We set the viewport meta from JS so it applies regardless of
@@ -1610,7 +1688,14 @@ export default function App({ session, signOut }) {
       <div style={{position:"sticky",top:0,zIndex:100,background:"#FFFFFF",borderBottom:"1px solid #DDD",padding:"8px 16px"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",flex:1,minWidth:0}}>
-            <span style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif"}}>Ash To Do</span>
+            <span
+              onClick={resetToHome}
+              role="button"
+              tabIndex={0}
+              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();resetToHome();}}}
+              title="Reset filters and scroll to top"
+              style={{fontSize:isMobile?18:17,fontWeight:"bold",fontFamily:"Georgia,serif",cursor:"pointer",userSelect:"none"}}
+            >Ash To Do</span>
             <span style={{fontSize:isMobile?13:12,color:"#999",fontFamily:"monospace"}}>
               {!isMobile && <>
                 {nAct} active · {nDone} done
@@ -1692,8 +1777,20 @@ export default function App({ session, signOut }) {
           </div>
           <div style={{flex:1,minWidth:180,position:"relative",display:"flex",alignItems:"center",...(isMobile?{flexBasis:"100%",marginTop:8}:{})}}>
             <input
+              ref={searchInputRef}
               value={filter}
               onChange={e=>setFilter(e.target.value)}
+              onKeyDown={e=>{
+                if (e.key === "Escape") {
+                  if (filter) {
+                    // First Escape clears the search box
+                    setFilter("");
+                  } else {
+                    // If already empty, blur out
+                    e.target.blur();
+                  }
+                }
+              }}
               placeholder="Search…"
               style={isMobile
                 ? {width:"100%",border:"1px solid #DDD",borderRadius:8,background:"#FFF",fontSize:16,padding:"10px 32px 10px 12px",outline:"none",fontFamily:"sans-serif",color:"#444",boxSizing:"border-box"}
