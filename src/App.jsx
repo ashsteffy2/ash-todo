@@ -69,6 +69,15 @@ const fmtDueDate = iso => {
   return y === curYear ? base : `${base}/${String(y).slice(-2)}`;
 };
 
+// Ordinal suffix for day numbers: 1→"1st", 2→"2nd", 3→"3rd", 7→"7th",
+// 11/12/13→"11th/12th/13th", 21→"21st", etc.
+const ordinal = n => {
+  if (n == null || isNaN(n)) return "";
+  const v = Math.abs(n) % 100;
+  const suffix = v >= 11 && v <= 13 ? "th" : (["th","st","nd","rd"][n % 10] || "th");
+  return `${n}${suffix}`;
+};
+
 const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const priorityColor = p => p==="High"?"#C0392B":p==="Medium"?"#E67E22":"#27AE60";
 const priorityBg = p => p==="High"?"#FADBD8":p==="Medium"?"#FDEBD0":"#D5F5E3";
@@ -931,13 +940,55 @@ const TaskRow = ({task,tasks,onToggleDone,onSave,onDelete,onMoveToToday,onMoveTo
     return [0,1,2,3,4,5,6].filter(d=>set.has(d)).map(d=>SHORT[d]).join("/");
   };
 
-  const rl = task.recurType && task.recurType!=="None"
-    ? ` (${
-        task.recurType==="Every X" ? `Every ${task.recurInterval||1} ${task.recurUnit||"Days"}`
-        : task.recurType==="Multi-Day" ? multiDayLabel(task.recurDays)
-        : task.recurType
-      })`
-    : "";
+  // Spell out an "Every X" custom recurrence in natural language. For weekly
+  // intervals we derive the weekday from the anchor date so it reads like
+  // "Every 2nd Thursday" (or "Every Thursday" when the interval is 1).
+  const everyXLabel = () => {
+    const n = task.recurInterval || 1;
+    const unit = task.recurUnit || "Days";
+    if (unit === "Weeks") {
+      const anchor = task.recurAnchor || task.created;
+      let weekday = null;
+      if (anchor) {
+        const [ay, am, ad] = String(anchor).split("-").map(Number);
+        if (ay && am && ad) weekday = DAYS_OF_WEEK[new Date(ay, am-1, ad).getDay()];
+      }
+      if (weekday) return n === 1 ? `Every ${weekday}` : `Every ${ordinal(n)} ${weekday}`;
+      return n === 1 ? "Every week" : `Every ${n} weeks`;
+    }
+    if (unit === "Days") return n === 1 ? "Every day" : `Every ${n} days`;
+    if (unit === "Months") {
+      const tail = task.recurDOM ? ` on the ${ordinal(task.recurDOM)}` : "";
+      return (n === 1 ? "Every month" : `Every ${n} months`) + tail;
+    }
+    if (unit === "Years") return n === 1 ? "Every year" : `Every ${n} years`;
+    return `Every ${n} ${unit}`;
+  };
+
+  // Human-readable recurrence detail shown in the parenthetical next to the date:
+  //   Weekly  → "Saturdays"            Monthly → "Monthly - 7th"
+  //   Annual  → "Annual - March 1st"   Every X → spelled-out custom rule
+  // recurDay/recurMonth can legitimately be 0, so guard with != null.
+  const recurDetail = () => {
+    switch (task.recurType) {
+      case "Weekly":
+        return task.recurDay != null ? `${DAYS_OF_WEEK[task.recurDay]}s` : "Weekly";
+      case "Monthly":
+        return task.recurDOM ? `Monthly - ${ordinal(task.recurDOM)}` : "Monthly";
+      case "Annual":
+        return (task.recurMonth != null && task.recurDOM)
+          ? `Annual - ${MONTHS[task.recurMonth]} ${ordinal(task.recurDOM)}`
+          : "Annual";
+      case "Every X":
+        return everyXLabel();
+      case "Multi-Day":
+        return multiDayLabel(task.recurDays);
+      default:
+        return task.recurType;
+    }
+  };
+
+  const rl = task.recurType && task.recurType!=="None" ? ` (${recurDetail()})` : "";
 
   const handleTouchStart = e => { touchStartX.current=e.touches[0].clientX; };
   const handleTouchEnd = e => {
